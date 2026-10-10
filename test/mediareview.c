@@ -104,6 +104,80 @@ static void spatial_sar_cases(const char *ffmpeg, const char *dir) {
   remove(input);
   arena_release(&arena);
 }
+/* Each op alone, the exact edges of crop and pad, one even step past them, and
+   a chain that follows the frame size through scale and crop. */
+static const char PLAN_PROGRAM[] =
+  "def trimmed : Video -> Video := fun (v : Video) => trim (interval 10 29) v\n"
+  "def half : Video -> Video := fun (v : Video) => scale (res 160 120) v\n"
+  "def corner : Video -> Video := fun (v : Video) => crop (rect 160 120 160 120) v\n"
+  "def wideCrop : Video -> Video := fun (v : Video) => crop (rect 160 0 162 120) v\n"
+  "def tallCrop : Video -> Video := fun (v : Video) => crop (rect 0 120 160 122) v\n"
+  "def farCrop : Video -> Video := fun (v : Video) => crop (rect 16384 0 2 2) v\n"
+  "def border : Video -> Video := fun (v : Video) => pad (padSpec 400 300 80 60 255) v\n"
+  "def wideShift : Video -> Video := fun (v : Video) => pad (padSpec 400 300 82 60 0) v\n"
+  "def tallShift : Video -> Video := fun (v : Video) => pad (padSpec 400 300 80 62 0) v\n"
+  "def narrowPad : Video -> Video := fun (v : Video) => pad (padSpec 318 240 0 0 0) v\n"
+  "def follow : Video -> Video := fun (v : Video) =>"
+  " pad (padSpec 164 120 4 0 16777215) (crop (rect 480 360 160 120) (scale (res 640 480) v))\n"
+  "def stale : Video -> Video := fun (v : Video) =>"
+  " pad (padSpec 164 120 6 0 0) (crop (rect 480 360 160 120) (scale (res 640 480) v))\n"
+  "def early : Video -> Video := fun (v : Video) => scale (res 160 120) (trim (interval 10 29) v)\n"
+  "def late : Video -> Video := fun (v : Video) => trim (interval 10 29) (crop (rect 0 0 160 120) v)\n";
+
+/* An entry of PLAN_PROGRAM on the 320x240 fixture without audio: its -vf, -af
+   and spatial chain, or CODE (not NULL) when the plan is refused. */
+static const struct {
+  const char *name;
+  const char *entry;
+  const char *code;
+  const char *vf;
+  const char *af;
+  const char *sf;
+} PLAN_ROWS[] = {
+  {"trim has no spatial step", "trimmed", NULL,
+   "trim=start_frame=10:end_frame=30,setpts=PTS-STARTPTS", "", ""},
+  {"scale text", "half", NULL, "scale=160:120,setpts=PTS-STARTPTS", "asetpts=PTS-STARTPTS", "scale=160:120"},
+  {"crop at the exact edge", "corner", NULL,
+   "crop=160:120:160:120,setpts=PTS-STARTPTS", "asetpts=PTS-STARTPTS", "crop=160:120:160:120"},
+  {"crop past the width", "wideCrop", "CROP_RANGE", NULL, NULL, NULL},
+  {"crop past the height", "tallCrop", "CROP_RANGE", NULL, NULL, NULL},
+  {"crop offset past the width", "farCrop", "CROP_RANGE", NULL, NULL, NULL},
+  {"pad at the exact edge", "border", NULL,
+   "pad=400:300:80:60:color=0x0000ff,setpts=PTS-STARTPTS", "asetpts=PTS-STARTPTS", "pad=400:300:80:60:color=0x0000ff"},
+  {"pad past the width", "wideShift", "PAD_RANGE", NULL, NULL, NULL},
+  {"pad past the height", "tallShift", "PAD_RANGE", NULL, NULL, NULL},
+  {"pad narrower than the frame", "narrowPad", "PAD_RANGE", NULL, NULL, NULL},
+  {"chain follows the frame size", "follow", NULL,
+   "scale=640:480,crop=160:120:480:360,pad=164:120:4:0:color=0xffffff,setpts=PTS-STARTPTS", "asetpts=PTS-STARTPTS",
+   "scale=640:480,crop=160:120:480:360,pad=164:120:4:0:color=0xffffff"},
+  {"chain pad past the followed width", "stale", "PAD_RANGE", NULL, NULL, NULL},
+  {"spatial step after a trim", "early", NULL,
+   "trim=start_frame=10:end_frame=30,setpts=PTS-STARTPTS,scale=160:120", "", "scale=160:120"},
+  {"trim after a spatial step", "late", NULL,
+   "crop=160:120:0:0,trim=start_frame=10:end_frame=30,setpts=PTS-STARTPTS", "", "crop=160:120:0:0"},
+};
+
+static void plan_cases(const char *input) {
+  static char vf[FILTER_MAX], af[FILTER_MAX], sf[FILTER_MAX];
+  Arena arena; Diag diag; Machine m; DeclList decls;
+  char *inputs[] = {(char *)input};
+  arena_init(&arena, (size_t)64 << 20); diag_init(&diag);
+  int loaded = front_load(&arena, "plan.lang", PLAN_PROGRAM, strlen(PLAN_PROGRAM), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  for (size_t i = 0; i < sizeof PLAN_ROWS / sizeof PLAN_ROWS[0]; i++) {
+    Source src;
+    Cut cut;
+    int status = 0;
+    diag_init(&diag);
+    int ok = loaded && prepare(&m, PLAN_ROWS[i].entry, inputs, 1, &src, vf, af, sf, &cut, &status);
+    expect(PLAN_ROWS[i].name, PLAN_ROWS[i].code == NULL
+      ? ok && strcmp(vf, PLAN_ROWS[i].vf) == 0 && strcmp(af, PLAN_ROWS[i].af) == 0 && strcmp(sf, PLAN_ROWS[i].sf) == 0
+      : loaded && !ok && status == 1 && diag.code != NULL && strcmp(diag.code, PLAN_ROWS[i].code) == 0);
+    if (loaded)
+      source_close(&src);
+  }
+  arena_release(&arena);
+}
 int main(void) {
   const char *ffmpeg = getenv("FFMPEG");
   if (ffmpeg == NULL) ffmpeg = "ffmpeg";
@@ -186,6 +260,7 @@ int main(void) {
   source_close(&src);
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
+  plan_cases(input);
   remove(input); remove(fractional); remove(saved); rmdir(dir);
   printf("media IO regressions: %u checked, %u failures\n", checked, failed);
   return failed != 0;

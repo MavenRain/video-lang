@@ -5,6 +5,7 @@
 #include "front/check.h"
 #include "front/front.h"
 #include "json.h"
+#include "media.h"
 
 static unsigned checked;
 static unsigned failed;
@@ -40,6 +41,14 @@ static void json_case(const char *name, const char *source, const char *want, co
   arena_release(&arena);
 }
 
+/* The index of the definition NAME, or m->def_count. */
+static uint32_t def_index(const Machine *m, const char *name) {
+  uint32_t i = 0;
+  while (i < m->def_count && strcmp(m->defs[i].name, name) != 0)
+    i++;
+  return i;
+}
+
 #define MK_INTERVAL "def mk : (lo : Nat) -> (hi : Nat) -> Interval := fun (lo : Nat) (hi : Nat) => interval lo hi\n"
 #define MK_RES "def mk : (w : Nat) -> (h : Nat) -> Resolution := fun (w : Nat) (h : Nat) => res w h\n"
 #define MK_RECT "def mk : (x : Nat) -> (y : Nat) -> Rect := fun (x : Nat) (y : Nat) => rect x y 2 2\n"
@@ -57,19 +66,56 @@ static void dynamic_case(const char *name, const char *source, uint64_t x, uint6
   arena_init(&arena, (size_t)64 << 20);
   diag_init(&diag);
   int ok = load(&arena, &diag, &m, source);
-  if (ok) {
-    uint32_t i;
-    for (i = 0; i < m.def_count; i++) {
-      if (strcmp(m.defs[i].name, "mk") == 0) {
-        m.def = "mk";
-        v = apply_value(&m, apply_value(&m, def_value(&m, i), val_nat(&m, x)), val_nat(&m, y));
-        break;
-      }
-    }
+  uint32_t i = ok ? def_index(&m, "mk") : 0;
+  if (ok && i < m.def_count) {
+    m.def = "mk";
+    v = apply_value(&m, apply_value(&m, def_value(&m, i), val_nat(&m, x)), val_nat(&m, y));
   }
   expect(name, ok && (code == NULL
     ? v != NULL && val_is(v, want) && v->args[0]->nat == x && v->args[second]->nat == y && !diag.set
     : v == NULL && diag.code != NULL && strcmp(diag.code, code) == 0), &diag);
+  arena_release(&arena);
+}
+
+/* s64 is 64 scale steps, s65 one more. byWidth is a scale with the width as a
+   parameter. */
+#define PLAN_SOURCE \
+  "def s1 : Video -> Video := fun (v : Video) => scale (res 160 120) v\n" \
+  "def s2 : Video -> Video := fun (v : Video) => s1 (s1 v)\n" \
+  "def s4 : Video -> Video := fun (v : Video) => s2 (s2 v)\n" \
+  "def s8 : Video -> Video := fun (v : Video) => s4 (s4 v)\n" \
+  "def s16 : Video -> Video := fun (v : Video) => s8 (s8 v)\n" \
+  "def s32 : Video -> Video := fun (v : Video) => s16 (s16 v)\n" \
+  "def s64 : Video -> Video := fun (v : Video) => s32 (s32 v)\n" \
+  "def s65 : Video -> Video := fun (v : Video) => s1 (s64 v)\n" \
+  "def byWidth : (w : Nat) -> Video -> Video := fun (w : Nat) (v : Video) => scale (res w 120) v\n"
+
+/* ENTRY of PLAN_SOURCE under `langc ffmpeg` with an input that does not
+   exist. The plan is read before the input opens: a refused plan gives CODE
+   with status 1, an accepted plan gets to MEDIA_INPUT with status 2. With
+   FREE_WIDTH, ENTRY is replaced by byWidth applied to a free Nat. */
+static void plan_case(const char *name, const char *entry, int free_width, int want, const char *code) {
+  Arena arena;
+  Diag diag;
+  Machine m;
+  char *inputs[] = {"no-such-input.mp4"};
+  int status = -1;
+  arena_init(&arena, (size_t)64 << 20);
+  diag_init(&diag);
+  FILE *out = tmpfile();
+  int ok = out != NULL && load(&arena, &diag, &m, PLAN_SOURCE);
+  uint32_t e = ok ? def_index(&m, entry) : 0;
+  uint32_t w = ok ? def_index(&m, "byWidth") : 0;
+  ok = ok && e < m.def_count && w < m.def_count;
+  /* No source term gets here: an entry has only Video parameters and an
+     axiom is refused. */
+  if (ok && free_width)
+    m.defs[e].value = apply_value(&m, def_value(&m, w), val_var(&m, 1u));
+  if (ok)
+    status = media_ffmpeg(&m, entry, inputs, 1, "out.mp4", out);
+  expect(name, ok && status == want && diag.code != NULL && strcmp(diag.code, code) == 0, &diag);
+  if (out != NULL)
+    fclose(out);
   arena_release(&arena);
 }
 
@@ -148,6 +194,10 @@ int main(void) {
   dynamic_case("dynamic odd crop y", MK_RECT, 2, 3, OP_MK_RECT, "FRAME_OFFSET");
   dynamic_case("dynamic pad color", MK_PAD, 2, 16777215, OP_MK_PAD_SPEC, NULL);
   dynamic_case("dynamic pad color above 24 bits", MK_PAD, 2, 16777216, OP_MK_PAD_SPEC, "PAD_COLOR");
+  plan_case("64 steps are a plan", "s64", 0, 2, "MEDIA_INPUT");
+  plan_case("65 steps are refused", "s65", 0, 1, "MEDIA_LIMIT");
+  plan_case("a literal res is a plan", "s1", 0, 2, "MEDIA_INPUT");
+  plan_case("a non-literal res is refused", "s1", 1, 1, "MEDIA_SHAPE");
   printf("media regressions: %u checked, %u failed\n", checked, failed);
   return failed == 0 ? 0 : 1;
 }
