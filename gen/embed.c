@@ -1,5 +1,5 @@
 /* Writes a C file that holds the bytes of the domain file.
-   Usage: tcc -run gen/embed.c domain/domain.lang build/domain.c
+   Usage: tcc -run gen/embed.c build/domain-all.lang build/domain.c
    SHARED by the tcc kits. */
 #include <stdio.h>
 

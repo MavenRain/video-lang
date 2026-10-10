@@ -1,7 +1,9 @@
 # Domain interface
 
-Replace the sample domain in `domain.lang` with the design of your
-language. `gen/embed.c` embeds this file in `build/langc` at build time.
+`domain.lang` holds the sample domain and `Position`. `video.lang` holds
+the video-lang definitions. The Makefile joins the two files, in that
+order, into `build/domain-all.lang`. `gen/embed.c` embeds that file in
+`build/langc` at build time.
 Its definitions have DOMAIN origin. Program files cannot redefine them.
 
 `domain.lang` uses the program syntax, and it can also declare families:
@@ -14,7 +16,7 @@ def lineTotal : (item : Item) -> Nat :=
   fun (item : Item) => natMul (itemPrice item) (itemCount item)
 ```
 
-- Only `domain.lang` can declare a family (rule R1). A program file that
+- Only a domain file can declare a family (rule R1). A program file that
   declares one is refused.
 - Each family, constructor, field and definition name in `domain.lang`
   becomes a core name (rule R4). A program cannot reuse it.

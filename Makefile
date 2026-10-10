@@ -21,9 +21,13 @@ HEADERS = $(wildcard src/*.h src/front/*.h)
 
 build: build/langc
 
-build/domain.c: domain/domain.lang gen/embed.c
+# The domain files, joined in this order into one embedded source.
+DOMAIN = domain/domain.lang domain/video.lang
+
+build/domain.c: $(DOMAIN) gen/embed.c
 	mkdir -p build
-	$(TCC) -run gen/embed.c domain/domain.lang build/domain.c
+	cat $(DOMAIN) > build/domain-all.lang
+	$(TCC) -run gen/embed.c build/domain-all.lang build/domain.c
 
 build/langc: $(SRC) $(HEADERS) build/domain.c
 	$(TCC) $(CFLAGS) -o build/langc $(SRC) build/domain.c $(FFMPEG_LDLIBS)

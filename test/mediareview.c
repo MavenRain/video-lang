@@ -50,9 +50,13 @@ int main(void) {
     int n = snprintf(path, sizeof path, "%.*s:%s", (int)(slash - ffmpeg), ffmpeg, old == NULL ? "" : old);
     if (n < 0 || (size_t)n >= sizeof path || setenv("PATH", path, 1) != 0) return 1;
   }
-  char dir[] = "/tmp/langc-media-review.XXXXXX";
-  if (mkdtemp(dir) == NULL) return 1;
-  char input[256], fractional[256], output[256], saved[256];
+  /* $TMPDIR first: a sandbox can deny /tmp. */
+  const char *tmp = getenv("TMPDIR");
+  if (tmp == NULL || tmp[0] == '\0') tmp = "/tmp";
+  char dir[1024];
+  int dir_len = snprintf(dir, sizeof dir, "%s/langc-media-review.XXXXXX", tmp);
+  if (dir_len < 0 || (size_t)dir_len >= sizeof dir || mkdtemp(dir) == NULL) return 1;
+  char input[sizeof dir + 64], fractional[sizeof dir + 64], output[sizeof dir + 64], saved[sizeof dir + 64];
   snprintf(input, sizeof input, "%s/input ' space.mp4", dir);
   snprintf(fractional, sizeof fractional, "%s/fractional.mkv", dir);
   snprintf(output, sizeof output, "%s/output ' space.mp4", dir);

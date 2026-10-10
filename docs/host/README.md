@@ -109,8 +109,10 @@ for each refusal.
 
 ## The domain
 
-`domain/domain.lang` is the sample domain. `gen/embed.c` embeds it in the
-executable at build time. `domain/README.md` tells how to replace it.
+`domain/domain.lang` is the sample domain and `domain/video.lang` holds the
+video-lang definitions. The Makefile joins them into
+`build/domain-all.lang`, and `gen/embed.c` embeds that file in the
+executable at build time. `domain/README.md` tells how to change them.
 
 ## Limits
 

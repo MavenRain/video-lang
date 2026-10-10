@@ -21,11 +21,3 @@ def depth : (s : Stack) -> Nat :=
 -- frame in its source (rank 0 = the first frame). Video, Interval, interval,
 -- trim and intersect are core names of the kit (src/front).
 def Position : Type 0 := Nat
--- video-lang M1: a Filter maps a Video to a Video, for example
--- `fun (v : Video) => scale (res 160 120) v`. Resolution, Rect, PadSpec,
--- res, rect, padSpec, scale, crop and pad are core names of the kit.
--- compose and idFilter make a monoid: the laws hold by evaluation (D1).
-def Filter : Type 0 := (v : Video) -> Video
-def idFilter : Filter := fun (v : Video) => v
-def compose : (f : Filter) -> (g : Filter) -> Filter :=
-  fun (f : Filter) (g : Filter) => fun (v : Video) => f (g v)

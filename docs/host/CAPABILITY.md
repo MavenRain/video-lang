@@ -11,7 +11,8 @@ kit, or to the root of a generated language.
 - `cc -Wall -Wextra -Wswitch-enum -Werror -fsyntax-only` checks the same
   sources (`make check-clang`). Each switch on an enum names every case
   and has no default arm.
-- `tcc -run gen/embed.c` turns `domain/domain.lang` into `build/domain.c`
+- `tcc -run gen/embed.c` turns `build/domain-all.lang` (the joined
+  `domain/*.lang` files) into `build/domain.c`
   at build time. The domain is part of the executable.
 
 ## Values
