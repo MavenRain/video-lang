@@ -1,0 +1,1 @@
+{"video-lang":1,"instances":[{"name":"price","type":"Nat","value":1200},{"name":"offer","type":"Sigma (n : Nat) (Eq Nat n 1200)","value":{"witness":1200,"payload":null}},{"name":"offered","type":"Nat","value":1200},{"name":"starred","type":"Sigma (n : Nat) (Eq Nat n 1200)","value":{"witness":1200,"payload":null}}]}

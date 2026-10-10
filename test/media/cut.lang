@@ -1,0 +1,10 @@
+def main : Video -> Video := fun (v : Video) => trim (interval 10 29) v
+def nested : Video -> Video := fun (v : Video) => trim (interval 20 40) (trim (interval 10 29) v)
+def capped : Video -> Video := fun (v : Video) => trim (interval 20 29) v
+def idem : Video -> Video := fun (v : Video) => trim (interval 10 29) (trim (interval 10 29) v)
+def tail : Video -> Video := fun (v : Video) => trim (interval 30 100) v
+def whole : Video -> Video := fun (v : Video) => v
+def pickB : Video -> Video -> Video := fun (a : Video) => fun (b : Video) => trim (interval 5 9) b
+def empty : Video -> Video := fun (v : Video) => trim (interval 60 70) v
+def disjoint : Video -> Video := fun (v : Video) => trim (interval 40 45) (trim (interval 10 29) v)
+def answer : Nat := 3

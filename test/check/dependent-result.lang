@@ -1,0 +1,3 @@
+def choose : Sum Nat Nat := inl 0
+def familyMaker : (n : Nat) -> Nat -> Lot n := fun n ignored => makeLot n 7
+def wrong : (n : Nat) -> Lot n := first (pair (either familyMaker familyMaker choose) 0)

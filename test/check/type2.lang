@@ -1,0 +1,1 @@
+def Large : Type 2 := Type 1

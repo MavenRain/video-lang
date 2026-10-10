@@ -1,0 +1,2 @@
+def ok : Nat := 1
+def big : Prod Nat Nat := pair 1 (natAdd 18446744073709551615 1)

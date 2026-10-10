@@ -1,0 +1,6 @@
+main 20 cut.lang main av.mp4
+nested 10 cut.lang nested av.mp4
+tail 20 cut.lang tail av.mp4
+whole 50 cut.lang whole av.mp4
+pick 5 cut.lang pickB av.mp4 v.mp4
+vonly 20 cut.lang main v.mp4

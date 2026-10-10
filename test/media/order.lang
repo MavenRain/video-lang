@@ -1,0 +1,1 @@
+def order : Video -> Video := fun (v : Video) => trim (interval 9 3) v

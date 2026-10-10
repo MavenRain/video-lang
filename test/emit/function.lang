@@ -1,0 +1,1 @@
+def pairFn : Prod (Nat -> Nat) Nat := pair (fun (x : Nat) => x) 1

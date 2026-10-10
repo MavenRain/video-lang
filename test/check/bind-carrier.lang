@@ -1,0 +1,2 @@
+def left : Sum Nat Nat := inl 7
+def wrong : Sum Flag Nat := bind left (fun (n : Nat) => inr n)

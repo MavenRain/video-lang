@@ -1,0 +1,1 @@
+def wrong : (p : Prod Nat Nat) -> Eq (Prod Nat Nat) (pair (second p) (first p)) p := fun p => refl
