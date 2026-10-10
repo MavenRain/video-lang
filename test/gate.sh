@@ -164,15 +164,25 @@ while read -r name frames prog entry inputs; do
 done <test/media/expect.txt
 echo "media R1: $(wc -l <test/media/expect.txt | tr -d ' ') checked"
 
-# Each line of test/media/laws.txt is `LEFT RIGHT IN`: the two builds have the
-# same framemd5 (D1: trim i (trim i v) = trim i v; trim i (trim j v) =
-# trim (i cap j) v).
-while read -r left right input; do
-  (cd "$media" &&
-    "$kit/build/langc" build "$kit/test/media/cut.lang" "$left" "$input" -o left.mp4 &&
-    "$kit/build/langc" build "$kit/test/media/cut.lang" "$right" "$input" -o right.mp4 &&
-    fm left.mp4 >left.md5 && fm right.mp4 >right.md5 && cmp -s left.md5 right.md5) \
-    || { echo "FAIL media law $left = $right on $input"; fail=$((fail + 1)); }
+# Each line of test/media/laws.txt is `KIND PROG LEFT RIGHT IN` (D1). exact:
+# the two builds have the same framemd5 (trim i (trim i v) = trim i v; trim i
+# (trim j v) = trim (i cap j) v; trim commutes with scale, crop and pad;
+# compose and idFilter make a monoid). shape: the framemd5 lines are equal
+# without the hash column (P3: scale r2 (scale r1 v) and scale r2 v have the
+# same frame count, sizes and times but not the same pixels; never a rewrite).
+while read -r kind prog left right input; do
+  case $kind in
+    exact) cols=6 ;;
+    shape) cols=5 ;;
+    *) cols=0 ;;
+  esac
+  (cd "$media" && [ "$cols" -ne 0 ] &&
+    "$kit/build/langc" build "$kit/test/media/$prog" "$left" "$input" -o left.mp4 &&
+    "$kit/build/langc" build "$kit/test/media/$prog" "$right" "$input" -o right.mp4 &&
+    fm left.mp4 >left.all && fm right.mp4 >right.all &&
+    cut -d, -f1-$cols left.all >left.md5 && cut -d, -f1-$cols right.all >right.md5 &&
+    cmp -s left.md5 right.md5) \
+    || { echo "FAIL media law $kind $left = $right on $input"; fail=$((fail + 1)); }
 done <test/media/laws.txt
 echo "media laws: $(wc -l <test/media/laws.txt | tr -d ' ') checked"
 

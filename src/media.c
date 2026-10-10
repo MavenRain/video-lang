@@ -1,9 +1,11 @@
-/* video-lang K0: the media back end of langc. The entry is evaluated on one
-   neutral input per Video parameter; its residual is a trim chain over one
-   input. The input is demuxed to its packets plus the position index (O-3,
-   D2). The build decodes, keeps the trimmed positions and their audio span
-   (O-4), rebases the timestamps (O-2) and encodes like the ffmpeg CLI does for
-   .mp4 (O-5). The ffmpeg verb prints the reference argv of the same cut. */
+/* video-lang M1: the media back end of langc. The entry is evaluated on one
+   neutral input per Video parameter; its residual is a chain of trim, scale,
+   crop and pad over one input. The input is demuxed to its packets plus the
+   position index (O-3, D2). The build decodes, keeps the trimmed positions
+   and their audio span (O-4), rebases the timestamps (O-2), sends the kept
+   frames through the spatial steps (one libavfilter graph) and encodes like
+   the ffmpeg CLI does for .mp4 (O-5). The ffmpeg verb prints the reference
+   argv of the same chain. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -14,25 +16,39 @@
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
+#include <libavfilter/avfilter.h>
+#include <libavfilter/buffersink.h>
+#include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
 
 #include "media.h"
 
-#define TRIM_MAX 64u
+#define STEP_MAX 64u
 #define FILTER_MAX 8192u
 #define PLANE_MAX 64
+#define ULL(x) ((unsigned long long)(x))
 
 typedef struct {
   uint64_t lo;
   uint64_t hi;
 } Span;
 
-/* The residual of the entry: input INPUT under TRIMS, innermost first. */
+typedef enum { STEP_TRIM, STEP_SCALE, STEP_CROP, STEP_PAD } StepKind;
+
+/* One op of the residual with the numbers of its first argument, in
+   constructor order: interval lo hi, res w h, rect x y w h, padSpec w h x y
+   color. */
+typedef struct {
+  StepKind kind;
+  uint64_t n[5];
+} Step;
+
+/* The residual of the entry: input INPUT under STEPS, innermost first. */
 typedef struct {
   uint32_t input;
-  Span trims[TRIM_MAX];
-  uint32_t trim_count;
+  Step steps[STEP_MAX];
+  uint32_t step_count;
 } Plan;
 
 /* One demuxed input: its video and audio packets in file order, and the
@@ -51,11 +67,13 @@ typedef struct {
   int64_t a0; /* the first audio sample, in 1/sample_rate */
 } Source;
 
-/* The kept positions and the kept decoded audio samples [astart, aend). */
+/* The kept positions, the kept decoded audio samples [astart, aend) and the
+   spatial steps SF as one -vf chain (NULL or empty: no spatial step). */
 typedef struct {
   Span keep;
   int64_t astart;
   int64_t aend;
+  const char *sf;
 } Cut;
 
 typedef struct {
@@ -70,6 +88,10 @@ typedef struct {
   AVFrame *frame;
   AVFrame *chunk;
   AVAudioFifo *fifo;
+  AVFilterGraph *graph; /* NULL: no spatial step */
+  AVFilterContext *bsrc;
+  AVFilterContext *bsink;
+  AVFrame *filtered;
   uint64_t position; /* the next video position out of the decoder */
   int64_t seen;      /* audio samples out of the decoder */
   int64_t apts;      /* audio samples sent to the encoder */
@@ -86,23 +108,46 @@ static int find_entry(const Machine *m, const char *name, uint32_t *out) {
   return 0;
 }
 
-/* 1 when V is `interval lo hi` with numeric ends. */
-static int interval_of(const Value *v, Span *out) {
-  if (v->kind != VAL_OP || v->op != OP_MK_INTERVAL || v->argc != 2u)
+/* The ops of a plan by row: the step, the arity of the constructor of its
+   first argument and the shape of that argument. */
+static const struct {
+  StepKind kind;
+  uint32_t arity;
+  const char *shape;
+} STEP_ROWS[] = {
+  {STEP_TRIM, 2u, "interval lo hi"},
+  {STEP_SCALE, 2u, "res w h"},
+  {STEP_CROP, 4u, "rect x y w h"},
+  {STEP_PAD, 5u, "padSpec w h x y color"},
+};
+
+/* The row of V when V is a stuck trim, scale, crop or pad, else -1. */
+static int step_row(const Value *v) {
+  if (v->kind != VAL_STUCK || v->argc != 2u)
+    return -1;
+  return v->op == OP_TRIM ? 0 : v->op == OP_SCALE ? 1 : v->op == OP_CROP ? 2 : v->op == OP_PAD ? 3 : -1;
+}
+
+/* 1 when A is the constructor of ROW with numeric fields; they go to OUT. */
+static int step_of(const Value *a, int row, Step *out) {
+  int ctor = row == 0 ? a->op == OP_MK_INTERVAL : row == 1 ? a->op == OP_MK_RES : row == 2 ? a->op == OP_MK_RECT : a->op == OP_MK_PAD_SPEC;
+  if (a->kind != VAL_OP || !ctor || a->argc != STEP_ROWS[row].arity)
     return 0;
-  if (v->args[0]->kind != VAL_NAT || v->args[1]->kind != VAL_NAT)
-    return 0;
-  out->lo = v->args[0]->nat;
-  out->hi = v->args[1]->nat;
+  out->kind = STEP_ROWS[row].kind;
+  for (uint32_t i = 0; i < a->argc; i++) {
+    if (a->args[i]->kind != VAL_NAT)
+      return 0;
+    out->n[i] = a->args[i]->nat;
+  }
   return 1;
 }
 
-/* Applies ENTRY to one neutral input per Video parameter and reads the trim
+/* Applies ENTRY to one neutral input per Video parameter and reads the step
    chain of the residual. *STATUS is the exit status of a failure. */
 static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, int *status) {
   uint32_t d = 0;
   uint32_t level = 0;
-  Span rev[TRIM_MAX];
+  Step rev[STEP_MAX];
   uint32_t n = 0;
   *status = 1;
   m->def = entry;
@@ -124,23 +169,24 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
     *status = 2;
     return diag_fail(m->diag, "MEDIA_ARGS", entry, "the entry takes %u inputs, found %d", level, input_count);
   }
-  while (v->kind == VAL_STUCK && v->op == OP_TRIM && v->argc == 2u) {
-    if (n == TRIM_MAX)
-      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "more than %u trims", TRIM_MAX);
-    if (!interval_of(v->args[0], &rev[n]))
-      return diag_fail(m->diag, "MEDIA_SHAPE", entry, "a trim interval is not `interval lo hi` with numbers");
-    if (rev[n].lo > rev[n].hi)
-      return diag_fail(m->diag, "INTERVAL_ORDER", entry, "interval %llu %llu has lo > hi",
-                       (unsigned long long)rev[n].lo, (unsigned long long)rev[n].hi);
+  int row = step_row(v);
+  while (row >= 0) {
+    if (n == STEP_MAX)
+      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "more than %u steps", STEP_MAX);
+    if (!step_of(v->args[0], row, &rev[n]))
+      return diag_fail(m->diag, "MEDIA_SHAPE", entry, "an argument is not `%s` with numbers", STEP_ROWS[row].shape);
+    if (rev[n].kind == STEP_TRIM && rev[n].n[0] > rev[n].n[1])
+      return diag_fail(m->diag, "INTERVAL_ORDER", entry, "interval %llu %llu has lo > hi", ULL(rev[n].n[0]), ULL(rev[n].n[1]));
     n++;
     v = v->args[1];
+    row = step_row(v);
   }
   if (v->kind != VAL_VAR || v->nat >= level)
-    return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a trim chain over an input");
+    return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a chain of trim, scale, crop and pad over an input");
   plan->input = (uint32_t)v->nat;
-  plan->trim_count = n;
+  plan->step_count = n;
   for (uint32_t k = 0; k < n; k++)
-    plan->trims[k] = rev[n - 1u - k];
+    plan->steps[k] = rev[n - 1u - k];
   return 1;
 }
 
@@ -256,50 +302,94 @@ static void drop_last_comma(char *text) {
     text[len - 1u] = '\0';
 }
 
-/* Restricts the position domain of S by each trim, innermost first. VF and
-   AF get the reference filter chains: each trim counts frames and samples
-   relative to its own input (D2). An empty domain is refused (D3). */
-static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s, char *vf, char *af, Cut *out) {
+/* Restricts the position domain of S by each trim and follows the frame size
+   through each spatial step, innermost first. VF and AF get the reference
+   filter chains: each trim counts frames and samples relative to its own
+   input (D2). SF gets the spatial steps alone. An empty domain (D3), a crop
+   outside its frame and a pad that does not hold its frame are refused. */
+static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s, char *vf, char *af, char *sf, Cut *out) {
+  const AVCodecParameters *par = s->fmt->streams[s->vs]->codecpar;
   uint64_t dlo = 0;
   uint64_t dhi = s->frames - 1u;
+  uint64_t w = (uint64_t)par->width;
+  uint64_t h = (uint64_t)par->height;
+  uint32_t trims = 0;
   size_t vn = 0;
   size_t an = 0;
+  size_t sn = 0;
   int audio = s->as >= 0;
   vf[0] = '\0';
   af[0] = '\0';
-  for (uint32_t k = 0; k < p->trim_count; k++) {
-    uint64_t lo = p->trims[k].lo > dlo ? p->trims[k].lo : dlo;
-    uint64_t hi = p->trims[k].hi < dhi ? p->trims[k].hi : dhi;
-    if (lo > hi)
-      return diag_fail(m->diag, "EMPTY_VIDEO", entry, "trim (interval %llu %llu) keeps no frame of positions %llu..%llu",
-                       (unsigned long long)p->trims[k].lo, (unsigned long long)p->trims[k].hi, (unsigned long long)dlo, (unsigned long long)dhi);
-    vn += (size_t)snprintf(vf + vn, FILTER_MAX - vn, "trim=start_frame=%llu:end_frame=%llu,setpts=PTS-STARTPTS,",
-                           (unsigned long long)(lo - dlo), (unsigned long long)(hi - dlo + 1u));
-    if (audio) {
-      int64_t base = sample_at(s, dlo);
-      an += (size_t)snprintf(af + an, FILTER_MAX - an, "atrim=start_sample=%lld", (long long)(sample_at(s, lo) - base));
-      if (hi + 1u < s->frames)
-        an += (size_t)snprintf(af + an, FILTER_MAX - an, ":end_sample=%lld", (long long)(sample_at(s, hi + 1u) - base));
-      an += (size_t)snprintf(af + an, FILTER_MAX - an, ",asetpts=PTS-STARTPTS,");
+  sf[0] = '\0';
+  for (uint32_t k = 0; k < p->step_count; k++) {
+    const uint64_t *n = p->steps[k].n;
+    char text[160];
+    int spatial = 1;
+    text[0] = '\0';
+    switch (p->steps[k].kind) {
+    case STEP_TRIM: {
+      uint64_t lo = n[0] > dlo ? n[0] : dlo;
+      uint64_t hi = n[1] < dhi ? n[1] : dhi;
+      if (lo > hi)
+        return diag_fail(m->diag, "EMPTY_VIDEO", entry, "trim (interval %llu %llu) keeps no frame of positions %llu..%llu",
+                         ULL(n[0]), ULL(n[1]), ULL(dlo), ULL(dhi));
+      snprintf(text, sizeof text, "trim=start_frame=%llu:end_frame=%llu,setpts=PTS-STARTPTS,", ULL(lo - dlo), ULL(hi - dlo + 1u));
+      if (audio) {
+        int64_t base = sample_at(s, dlo);
+        an += (size_t)snprintf(af + an, FILTER_MAX - an, "atrim=start_sample=%lld", (long long)(sample_at(s, lo) - base));
+        if (hi + 1u < s->frames)
+          an += (size_t)snprintf(af + an, FILTER_MAX - an, ":end_sample=%lld", (long long)(sample_at(s, hi + 1u) - base));
+        an += (size_t)snprintf(af + an, FILTER_MAX - an, ",asetpts=PTS-STARTPTS,");
+      }
+      dlo = lo;
+      dhi = hi;
+      trims++;
+      spatial = 0;
+      break;
     }
-    dlo = lo;
-    dhi = hi;
+    case STEP_SCALE:
+      snprintf(text, sizeof text, "scale=%llu:%llu,", ULL(n[0]), ULL(n[1]));
+      w = n[0];
+      h = n[1];
+      break;
+    case STEP_CROP:
+      if (n[0] > w || n[2] > w - n[0] || n[1] > h || n[3] > h - n[1])
+        return diag_fail(m->diag, "CROP_RANGE", entry, "rect %llu %llu %llu %llu is outside the %llux%llu frame",
+                         ULL(n[0]), ULL(n[1]), ULL(n[2]), ULL(n[3]), ULL(w), ULL(h));
+      snprintf(text, sizeof text, "crop=%llu:%llu:%llu:%llu,", ULL(n[2]), ULL(n[3]), ULL(n[0]), ULL(n[1]));
+      w = n[2];
+      h = n[3];
+      break;
+    case STEP_PAD:
+      if (w > n[0] || n[2] > n[0] - w || h > n[1] || n[3] > n[1] - h)
+        return diag_fail(m->diag, "PAD_RANGE", entry, "padSpec %llu %llu %llu %llu does not hold the %llux%llu frame",
+                         ULL(n[0]), ULL(n[1]), ULL(n[2]), ULL(n[3]), ULL(w), ULL(h));
+      snprintf(text, sizeof text, "pad=%llu:%llu:%llu:%llu:color=0x%06llx,", ULL(n[0]), ULL(n[1]), ULL(n[2]), ULL(n[3]), ULL(n[4]));
+      w = n[0];
+      h = n[1];
+      break;
+    }
+    vn += (size_t)snprintf(vf + vn, FILTER_MAX - vn, "%s", text);
+    if (spatial)
+      sn += (size_t)snprintf(sf + sn, FILTER_MAX - sn, "%s", text);
   }
-  if (p->trim_count == 0) {
-    snprintf(vf, FILTER_MAX, "setpts=PTS-STARTPTS");
+  if (trims == 0) {
+    snprintf(vf + vn, FILTER_MAX - vn, "setpts=PTS-STARTPTS");
     snprintf(af, FILTER_MAX, "asetpts=PTS-STARTPTS");
   }
   drop_last_comma(vf);
   drop_last_comma(af);
+  drop_last_comma(sf);
   out->keep.lo = dlo;
   out->keep.hi = dhi;
   out->astart = audio ? sample_at(s, dlo) : 0;
   out->aend = audio && dhi + 1u < s->frames ? sample_at(s, dhi + 1u) : INT64_MAX;
+  out->sf = sf;
   return 1;
 }
 
 /* Plan, demux and cut. *STATUS is the exit status of a failure. */
-static int prepare(Machine *m, const char *entry, char *const *inputs, int input_count, Source *src, char *vf, char *af, Cut *cut, int *status) {
+static int prepare(Machine *m, const char *entry, char *const *inputs, int input_count, Source *src, char *vf, char *af, char *sf, Cut *cut, int *status) {
   Plan plan;
   memset(src, 0, sizeof *src);
   src->vs = -1;
@@ -308,7 +398,7 @@ static int prepare(Machine *m, const char *entry, char *const *inputs, int input
   if (!plan_of(m, entry, input_count, &plan, status) || !source_open(m, inputs[plan.input], src, status))
     return 0;
   *status = 1;
-  if (!cut_of(m, entry, &plan, src, vf, af, cut))
+  if (!cut_of(m, entry, &plan, src, vf, af, sf, cut))
     return 0;
   *status = (int)plan.input; /* the caller reads the input index here */
   return 1;
@@ -336,7 +426,8 @@ int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_c
   int status = 1;
   char vf[FILTER_MAX];
   char af[FILTER_MAX];
-  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, &cut, &status);
+  char sf[FILTER_MAX];
+  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, sf, &cut, &status);
   if (ok) {
     fputs("ffmpeg -i ", out);
     shell_path(out, inputs[status]);
@@ -371,9 +462,11 @@ static AVCodecContext *open_decoder(const AVStream *st) {
 }
 
 /* The encoder the ffmpeg CLI picks for PATH, set up like its encoder open
-   (fftools enc_open): the frame properties, the time base 1/fr (video) or
-   1/sample_rate (audio), the global header for mp4, threads=auto. */
-static AVCodecContext *open_encoder(const AVFormatContext *oc, enum AVMediaType type, const char *path, const AVCodecContext *dec, AVRational fr) {
+   (fftools enc_open): the frame properties (size, SAR, pixel format and color
+   from the graph SINK when there is one, as fftools takes them from the
+   filtered frame), the time base 1/fr (video) or 1/sample_rate (audio), the
+   global header for mp4, threads=auto. */
+static AVCodecContext *open_encoder(const AVFormatContext *oc, enum AVMediaType type, const char *path, const AVCodecContext *dec, const AVFilterContext *sink, AVRational fr) {
   const AVCodec *codec = avcodec_find_encoder(av_guess_codec(oc->oformat, NULL, path, NULL, type));
   AVCodecContext *enc = codec == NULL ? NULL : avcodec_alloc_context3(codec);
   AVDictionary *opts = NULL;
@@ -381,14 +474,14 @@ static AVCodecContext *open_encoder(const AVFormatContext *oc, enum AVMediaType 
     return NULL;
   int ok = 1;
   if (type == AVMEDIA_TYPE_VIDEO) {
-    enc->width = dec->width;
-    enc->height = dec->height;
-    enc->pix_fmt = dec->pix_fmt;
-    enc->sample_aspect_ratio = dec->sample_aspect_ratio;
-    enc->color_range = dec->color_range;
+    enc->width = sink == NULL ? dec->width : av_buffersink_get_w(sink);
+    enc->height = sink == NULL ? dec->height : av_buffersink_get_h(sink);
+    enc->pix_fmt = sink == NULL ? dec->pix_fmt : (enum AVPixelFormat)av_buffersink_get_format(sink);
+    enc->sample_aspect_ratio = sink == NULL ? dec->sample_aspect_ratio : av_buffersink_get_sample_aspect_ratio(sink);
+    enc->color_range = sink == NULL ? dec->color_range : av_buffersink_get_color_range(sink);
     enc->color_primaries = dec->color_primaries;
     enc->color_trc = dec->color_trc;
-    enc->colorspace = dec->colorspace;
+    enc->colorspace = sink == NULL ? dec->colorspace : av_buffersink_get_colorspace(sink);
     enc->chroma_sample_location = dec->chroma_sample_location;
     enc->time_base = av_inv_q(fr);
     enc->framerate = fr;
@@ -416,8 +509,50 @@ static AVStream *add_stream(AVFormatContext *oc, const AVCodecContext *enc) {
   return st;
 }
 
-/* Opens the decoders, the encoders, the muxer and the output file. Returns
-   NULL, or the reason of the failure. */
+/* The spatial steps as one graph buffer -> SF -> buffersink, set up like the
+   -vf graph of the ffmpeg CLI: the buffer takes the decoder frame properties
+   at the time base 1/fr, and scale_sws_opts is flags=bicubic (the fftools sws
+   default). Returns NULL, or the reason of the failure. */
+static const char *graph_open(Enc *e, const Source *s) {
+  const AVCodecContext *dec = e->vdec;
+  AVFilterInOut *outs = avfilter_inout_alloc();
+  AVFilterInOut *ins = avfilter_inout_alloc();
+  AVBufferSrcParameters *par = av_buffersrc_parameters_alloc();
+  e->graph = avfilter_graph_alloc();
+  int ok = e->graph != NULL && outs != NULL && ins != NULL && par != NULL;
+  if (ok) {
+    par->format = dec->pix_fmt;
+    par->time_base = av_inv_q(s->fr);
+    par->frame_rate = s->fr;
+    par->width = dec->width;
+    par->height = dec->height;
+    /* Container SAR can be known when the decoder has no SAR (e.g. FFV1). */
+    par->sample_aspect_ratio = av_guess_sample_aspect_ratio(s->fmt, s->fmt->streams[s->vs], NULL);
+    par->color_space = dec->colorspace;
+    par->color_range = dec->color_range;
+    e->graph->scale_sws_opts = av_strdup("flags=bicubic");
+    e->bsrc = avfilter_graph_alloc_filter(e->graph, avfilter_get_by_name("buffer"), "in");
+  }
+  ok = ok && e->graph->scale_sws_opts != NULL && e->bsrc != NULL
+       && av_buffersrc_parameters_set(e->bsrc, par) >= 0 && avfilter_init_dict(e->bsrc, NULL) >= 0
+       && avfilter_graph_create_filter(&e->bsink, avfilter_get_by_name("buffersink"), "out", NULL, NULL, e->graph) >= 0;
+  if (ok) {
+    outs->name = av_strdup("in");
+    outs->filter_ctx = e->bsrc;
+    ins->name = av_strdup("out");
+    ins->filter_ctx = e->bsink;
+  }
+  ok = ok && outs->name != NULL && ins->name != NULL
+       && avfilter_graph_parse_ptr(e->graph, e->cut.sf, &ins, &outs, NULL) >= 0
+       && avfilter_graph_config(e->graph, NULL) >= 0;
+  avfilter_inout_free(&ins);
+  avfilter_inout_free(&outs);
+  av_free(par);
+  return ok ? NULL : "cannot set up the filter graph";
+}
+
+/* Opens the decoders, the graph, the encoders, the muxer and the output file.
+   Returns NULL, or the reason of the failure. */
 static const char *enc_open(Enc *e, const Source *s, const char *path, const char *io_path) {
   if (avformat_alloc_output_context2(&e->oc, NULL, NULL, path) < 0 || e->oc == NULL)
     return "no muxer for the output name";
@@ -425,8 +560,11 @@ static const char *enc_open(Enc *e, const Source *s, const char *path, const cha
   e->adec = s->as < 0 ? NULL : open_decoder(s->fmt->streams[s->as]);
   if (e->vdec == NULL || (s->as >= 0 && e->adec == NULL))
     return "cannot open a decoder";
-  e->venc = open_encoder(e->oc, AVMEDIA_TYPE_VIDEO, path, e->vdec, s->fr);
-  e->aenc = e->adec == NULL ? NULL : open_encoder(e->oc, AVMEDIA_TYPE_AUDIO, path, e->adec, s->fr);
+  const char *why = e->cut.sf == NULL || e->cut.sf[0] == '\0' ? NULL : graph_open(e, s);
+  if (why != NULL)
+    return why;
+  e->venc = open_encoder(e->oc, AVMEDIA_TYPE_VIDEO, path, e->vdec, e->bsink, s->fr);
+  e->aenc = e->adec == NULL ? NULL : open_encoder(e->oc, AVMEDIA_TYPE_AUDIO, path, e->adec, NULL, s->fr);
   if (e->venc == NULL || (e->adec != NULL && e->aenc == NULL))
     return "cannot open an encoder";
   e->vst = add_stream(e->oc, e->venc);
@@ -441,7 +579,8 @@ static const char *enc_open(Enc *e, const Source *s, const char *path, const cha
   e->pkt = av_packet_alloc();
   e->frame = av_frame_alloc();
   e->chunk = av_frame_alloc();
-  if (e->pkt == NULL || e->frame == NULL || e->chunk == NULL || (e->aenc != NULL && e->fifo == NULL))
+  e->filtered = av_frame_alloc();
+  if (e->pkt == NULL || e->frame == NULL || e->chunk == NULL || e->filtered == NULL || (e->aenc != NULL && e->fifo == NULL))
     return "out of memory";
   if (avio_open(&e->oc->pb, io_path, AVIO_FLAG_WRITE) < 0)
     return "cannot open the output file";
@@ -458,9 +597,11 @@ static int enc_free(Enc *e) {
   avcodec_free_context(&e->venc);
   avcodec_free_context(&e->aenc);
   av_audio_fifo_free(e->fifo);
+  avfilter_graph_free(&e->graph);
   av_packet_free(&e->pkt);
   av_frame_free(&e->frame);
   av_frame_free(&e->chunk);
+  av_frame_free(&e->filtered);
   return closed;
 }
 
@@ -482,8 +623,31 @@ static int send(Enc *e, AVCodecContext *enc, const AVStream *st, const AVFrame *
   return drained(r);
 }
 
-/* Each kept frame gets pts = its rank in the cut (O-2, setpts=PTS-STARTPTS)
-   and loses the decoder picture type, which libx264 would force. */
+/* Encodes F without the decoder picture type, which libx264 would force. */
+static int video_out(Enc *e, AVFrame *f) {
+  f->duration = 1;
+  f->time_base = e->venc->time_base;
+  f->pict_type = AV_PICTURE_TYPE_NONE;
+  f->flags &= ~AV_FRAME_FLAG_KEY;
+  return send(e, e->venc, e->vst, f);
+}
+
+/* Sends F (NULL: the end) through the graph and encodes every frame it
+   gives. */
+static int filter_frame(Enc *e, AVFrame *f) {
+  int r = av_buffersrc_add_frame(e->bsrc, f);
+  while (r >= 0) {
+    r = av_buffersink_get_frame(e->bsink, e->filtered);
+    if (r >= 0) {
+      r = video_out(e, e->filtered);
+      av_frame_unref(e->filtered);
+    }
+  }
+  return drained(r);
+}
+
+/* Each kept frame gets pts = its rank in the cut (O-2, setpts=PTS-STARTPTS),
+   then goes through the spatial steps, if any. */
 static int video_frames(Enc *e) {
   int r = 0;
   while (r >= 0 && (r = avcodec_receive_frame(e->vdec, e->frame)) >= 0) {
@@ -492,9 +656,7 @@ static int video_frames(Enc *e) {
       e->frame->pts = (int64_t)(p - e->cut.keep.lo);
       e->frame->duration = 1;
       e->frame->time_base = e->venc->time_base;
-      e->frame->pict_type = AV_PICTURE_TYPE_NONE;
-      e->frame->flags &= ~AV_FRAME_FLAG_KEY;
-      r = send(e, e->venc, e->vst, e->frame);
+      r = e->graph == NULL ? video_out(e, e->frame) : filter_frame(e, e->frame);
     }
     av_frame_unref(e->frame);
   }
@@ -569,6 +731,8 @@ static int enc_run(Enc *e, const Source *s) {
   }
   if (r >= 0 && (r = avcodec_send_packet(e->vdec, NULL)) >= 0)
     r = video_frames(e);
+  if (r >= 0 && e->graph != NULL)
+    r = filter_frame(e, NULL);
   if (r >= 0 && e->adec != NULL && (r = avcodec_send_packet(e->adec, NULL)) >= 0)
     r = audio_frames(e);
   if (r >= 0 && e->aenc != NULL && av_audio_fifo_size(e->fifo) > 0)
@@ -626,7 +790,8 @@ int media_build(Machine *m, const char *entry, char *const *inputs, int input_co
   int status = 1;
   char vf[FILTER_MAX];
   char af[FILTER_MAX];
-  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, &cut, &status);
+  char sf[FILTER_MAX];
+  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, sf, &cut, &status);
   int result = ok ? encode(m, &src, &cut, out_path) : status;
   source_close(&src);
   return result;

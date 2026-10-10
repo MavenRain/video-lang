@@ -1,0 +1,1 @@
+def bigColor : Video -> Video := fun (v : Video) => pad (padSpec 400 300 40 30 16777216) v

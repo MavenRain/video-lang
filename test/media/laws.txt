@@ -1,4 +1,11 @@
-idem main av.mp4
-nested capped av.mp4
-idem main v.mp4
-nested capped v.mp4
+exact cut.lang idem main av.mp4
+exact cut.lang nested capped av.mp4
+exact cut.lang idem main v.mp4
+exact cut.lang nested capped v.mp4
+exact space.lang scaleCut small av.mp4
+exact space.lang cropCut box av.mp4
+exact space.lang padCut frame av.mp4
+exact space.lang leftId boxed av.mp4
+exact space.lang rightId boxed av.mp4
+exact space.lang chain chainR av.mp4
+shape space.lang twice once av.mp4

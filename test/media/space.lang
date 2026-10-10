@@ -1,0 +1,19 @@
+def small : Video -> Video := fun (v : Video) => scale (res 160 120) (trim (interval 10 29) v)
+def big : Video -> Video := fun (v : Video) => scale (res 640 480) v
+def box : Video -> Video := fun (v : Video) => crop (rect 40 20 160 120) (trim (interval 10 29) v)
+def frame : Video -> Video := fun (v : Video) => pad (padSpec 400 300 40 30 1056816) (trim (interval 10 29) v)
+def twice : Video -> Video := fun (v : Video) => scale (res 160 120) (scale (res 240 180) v)
+def once : Video -> Video := fun (v : Video) => scale (res 160 120) v
+def scaleCut : Video -> Video := fun (v : Video) => trim (interval 10 29) (scale (res 160 120) v)
+def cropCut : Video -> Video := fun (v : Video) => trim (interval 10 29) (crop (rect 40 20 160 120) v)
+def padCut : Video -> Video := fun (v : Video) => trim (interval 10 29) (pad (padSpec 400 300 40 30 1056816) v)
+def cutF : Filter := fun (v : Video) => trim (interval 10 29) v
+def boxF : Filter := fun (v : Video) => crop (rect 40 20 160 120) v
+def half : Filter := fun (v : Video) => scale (res 80 60) v
+def boxed : Video -> Video := compose boxF cutF
+def leftId : Video -> Video := compose idFilter (compose boxF cutF)
+def rightId : Video -> Video := compose (compose boxF cutF) idFilter
+def chain : Video -> Video := compose half (compose boxF cutF)
+def chainR : Video -> Video := compose (compose half boxF) cutF
+def wide : Video -> Video := fun (v : Video) => crop (rect 200 0 160 120) v
+def shift : Video -> Video := fun (v : Video) => pad (padSpec 320 240 10 0 0) v

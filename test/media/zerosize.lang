@@ -1,0 +1,1 @@
+def zeroSize : Video -> Video := fun (v : Video) => scale (res 0 120) v

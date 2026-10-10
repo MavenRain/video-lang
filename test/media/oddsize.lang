@@ -1,0 +1,1 @@
+def oddSize : Video -> Video := fun (v : Video) => scale (res 161 120) v

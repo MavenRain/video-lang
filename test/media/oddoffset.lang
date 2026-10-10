@@ -1,0 +1,1 @@
+def oddOffset : Video -> Video := fun (v : Video) => crop (rect 41 20 160 120) v
