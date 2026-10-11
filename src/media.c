@@ -5,10 +5,13 @@
    and their audio span (O-4), rebases the timestamps (O-2), sends the kept
    frames through the spatial steps (one libavfilter graph) and encodes like
    the ffmpeg CLI does for .mp4 (O-5). The ffmpeg verb prints the reference
-   argv of the same chain. */
+   argv of the same chain. M2 adds Font parameters and burnText: each track
+   entry is one drawtext, active on its window of positions. In process the
+   live graph is rebuilt each time the set of active entries changes. */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,11 +24,15 @@
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
+#include <ft2build.h>
+#include FT_FREETYPE_H
 
 #include "media.h"
 
 #define STEP_MAX 64u
-#define FILTER_MAX 8192u
+#define TEXT_MAX 64u /* the in-process mask is one uint64_t */
+#define PARAM_MAX 64u
+#define FILTER_MAX 65536u
 #define PLANE_MAX 64
 #define ULL(x) ((unsigned long long)(x))
 
@@ -34,22 +41,47 @@ typedef struct {
   uint64_t hi;
 } Span;
 
-typedef enum { STEP_TRIM, STEP_SCALE, STEP_CROP, STEP_PAD } StepKind;
+typedef enum { STEP_TRIM, STEP_SCALE, STEP_CROP, STEP_PAD, STEP_TEXT } StepKind;
 
 /* One op of the residual with the numbers of its first argument, in
    constructor order: interval lo hi, res w h, rect x y w h, padSpec w h x y
-   color. */
+   color, style font size color x y (font = the input index). A text step
+   also holds its track entries [e0, e1) of the plan table. */
 typedef struct {
   StepKind kind;
   uint64_t n[5];
+  uint32_t e0;
+  uint32_t e1;
 } Step;
 
-/* The residual of the entry: input INPUT under STEPS, innermost first. */
+/* One track entry: the positions lo..hi and the Text bytes. */
+typedef struct {
+  uint64_t lo;
+  uint64_t hi;
+  const char *bytes;
+  uint64_t len;
+} TextEntry;
+
+/* The residual of the entry: input INPUT under STEPS, innermost first.
+   FONTS has bit i when parameter i is a Font. */
 typedef struct {
   uint32_t input;
   Step steps[STEP_MAX];
   uint32_t step_count;
+  TextEntry entries[TEXT_MAX];
+  uint32_t entry_count;
+  uint64_t fonts;
 } Plan;
+
+/* One drawtext of the in-process graph: active on the absolute positions
+   lo..hi, inserted at offset AT of the spatial chain (an offset past the
+   end: after the last spatial step). TEXT has no enable option. */
+typedef struct {
+  uint64_t lo;
+  uint64_t hi;
+  size_t at;
+  const char *text;
+} Burn;
 
 /* One demuxed input: its video and audio packets in file order, and the
    position index (VPTS[p] = the pts of the frame at position p). */
@@ -67,13 +99,16 @@ typedef struct {
   int64_t a0; /* the first audio sample, in 1/sample_rate */
 } Source;
 
-/* The kept positions, the kept decoded audio samples [astart, aend) and the
-   spatial steps SF as one -vf chain (NULL or empty: no spatial step). */
+/* The kept positions, the kept decoded audio samples [astart, aend), the
+   spatial steps SF as one -vf chain (NULL or empty: no spatial step) and the
+   drawtexts that go into it, in chain order (bit i of a mask = BURNS[i]). */
 typedef struct {
   Span keep;
   int64_t astart;
   int64_t aend;
   const char *sf;
+  Burn burns[TEXT_MAX];
+  uint32_t burn_count;
 } Cut;
 
 typedef struct {
@@ -88,14 +123,17 @@ typedef struct {
   AVFrame *frame;
   AVFrame *chunk;
   AVAudioFifo *fifo;
-  AVFilterGraph *graph; /* NULL: no spatial step */
+  AVFilterGraph *graph; /* NULL: the chain of MASK is empty */
   AVFilterContext *bsrc;
   AVFilterContext *bsink;
   AVFrame *filtered;
   uint64_t position; /* the next video position out of the decoder */
   int64_t seen;      /* audio samples out of the decoder */
   int64_t apts;      /* audio samples sent to the encoder */
+  uint64_t mask;     /* the burns of the live graph */
+  const Source *src;
   Cut cut;
+  char chain[FILTER_MAX];
 } Enc;
 
 static int find_entry(const Machine *m, const char *name, uint32_t *out) {
@@ -121,11 +159,56 @@ static const struct {
   {STEP_PAD, 5u, "padSpec w h x y color"},
 };
 
-/* The row of V when V is a stuck trim, scale, crop or pad, else -1. */
+/* The row of V when V is a stuck trim, scale, crop or pad, 4 when V is a
+   stuck burnText, else -1. */
 static int step_row(const Value *v) {
-  if (v->kind != VAL_STUCK || v->argc != 2u)
+  if (v->kind != VAL_STUCK)
+    return -1;
+  if (v->op == OP_BURN_TEXT)
+    return v->argc == 3u ? 4 : -1;
+  if (v->argc != 2u)
     return -1;
   return v->op == OP_TRIM ? 0 : v->op == OP_SCALE ? 1 : v->op == OP_CROP ? 2 : v->op == OP_PAD ? 3 : -1;
+}
+
+/* 1 when A is `style f size color x y` with f a Font parameter (one of
+   FONTS) and numbers; they go to OUT in that order. */
+static int style_of(const Value *a, uint64_t fonts, Step *out) {
+  if (a->kind != VAL_OP || a->op != OP_MK_STYLE || a->argc != 5u)
+    return 0;
+  const Value *f = a->args[0];
+  if (f->kind != VAL_VAR || f->nat >= PARAM_MAX || !(fonts >> f->nat & 1u))
+    return 0;
+  out->kind = STEP_TEXT;
+  out->n[0] = f->nat;
+  for (uint32_t i = 1; i < 5u; i++) {
+    if (a->args[i]->kind != VAL_NAT)
+      return 0;
+    out->n[i] = a->args[i]->nat;
+  }
+  return 1;
+}
+
+/* Appends the entries of TRACK (a cons/nil list of `pair (interval lo hi)
+   "..."`) to the plan table. Returns 0 (done), 1 (not that shape) or 2
+   (more than TEXT_MAX entries). */
+static int track_of(const Value *track, Plan *plan) {
+  const Value *t = track;
+  while (t->kind == VAL_OP && t->op == OP_CONS && t->argc == 2u) {
+    const Value *p = t->args[0];
+    if (p->kind != VAL_OP || p->op != OP_PAIR || p->argc != 2u)
+      return 1;
+    const Value *iv = p->args[0];
+    const Value *text = p->args[1];
+    if (iv->kind != VAL_OP || iv->op != OP_MK_INTERVAL || iv->argc != 2u || iv->args[0]->kind != VAL_NAT
+        || iv->args[1]->kind != VAL_NAT || text->kind != VAL_TEXT)
+      return 1;
+    if (plan->entry_count == TEXT_MAX)
+      return 2;
+    plan->entries[plan->entry_count++] = (TextEntry){iv->args[0]->nat, iv->args[1]->nat, text->name, text->nat};
+    t = t->args[1];
+  }
+  return t->kind == VAL_OP && t->op == OP_NIL ? 0 : 1;
 }
 
 /* 1 when A is the constructor of ROW with numeric fields; they go to OUT. */
@@ -142,8 +225,8 @@ static int step_of(const Value *a, int row, Step *out) {
   return 1;
 }
 
-/* Applies ENTRY to one neutral input per Video parameter and reads the step
-   chain of the residual. *STATUS is the exit status of a failure. */
+/* Applies ENTRY to one neutral input per Video or Font parameter and reads
+   the step chain of the residual. *STATUS is the exit status of a failure. */
 static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, int *status) {
   uint32_t d = 0;
   uint32_t level = 0;
@@ -151,11 +234,16 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
   uint32_t n = 0;
   *status = 1;
   m->def = entry;
+  plan->entry_count = 0;
+  plan->fonts = 0;
   if (!find_entry(m, entry, &d))
     return diag_fail(m->diag, "EVAL_ENTRY", entry, "no definition has this name");
   const Value *v = def_value(m, d);
   const Value *type = m->defs[d].type;
-  while (v != NULL && type != NULL && type->kind == VAL_PI && val_is(type->dom, OP_VIDEO)) {
+  while (v != NULL && type != NULL && type->kind == VAL_PI && (val_is(type->dom, OP_VIDEO) || val_is(type->dom, OP_FONT))) {
+    if (level == PARAM_MAX)
+      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "more than %u parameters", PARAM_MAX);
+    plan->fonts |= val_is(type->dom, OP_FONT) ? UINT64_C(1) << level : 0u;
     const Value *x = val_var(m, level);
     v = apply_value(m, v, x);
     type = type->body == NULL ? type->arg : closure_apply(m, type, x);
@@ -164,7 +252,7 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
   if (v == NULL || type == NULL)
     return 0;
   if (!val_is(type, OP_VIDEO))
-    return diag_fail(m->diag, "MEDIA_TYPE", entry, "the entry must have the type Video -> ... -> Video");
+    return diag_fail(m->diag, "MEDIA_TYPE", entry, "the entry must have the type Video or Font -> ... -> Video");
   if (level != (uint32_t)input_count) {
     *status = 2;
     return diag_fail(m->diag, "MEDIA_ARGS", entry, "the entry takes %u inputs, found %d", level, input_count);
@@ -173,16 +261,27 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
   while (row >= 0) {
     if (n == STEP_MAX)
       return diag_fail(m->diag, "MEDIA_LIMIT", entry, "more than %u steps", STEP_MAX);
-    if (!step_of(v->args[0], row, &rev[n]))
+    if (row == 4) {
+      if (!style_of(v->args[0], plan->fonts, &rev[n]))
+        return diag_fail(m->diag, "MEDIA_SHAPE", entry, "an argument is not `style f size color x y` with numbers");
+      rev[n].e0 = plan->entry_count;
+      int track = track_of(v->args[1], plan);
+      if (track == 2)
+        return diag_fail(m->diag, "TEXT_LIMIT", entry, "more than %u track entries", TEXT_MAX);
+      if (track != 0)
+        return diag_fail(m->diag, "MEDIA_SHAPE", entry, "a track is not a list of `pair (interval lo hi) \"...\"`");
+      rev[n].e1 = plan->entry_count;
+    } else if (!step_of(v->args[0], row, &rev[n])) {
       return diag_fail(m->diag, "MEDIA_SHAPE", entry, "an argument is not `%s` with numbers", STEP_ROWS[row].shape);
+    }
     if (rev[n].kind == STEP_TRIM && rev[n].n[0] > rev[n].n[1])
       return diag_fail(m->diag, "INTERVAL_ORDER", entry, "interval %llu %llu has lo > hi", ULL(rev[n].n[0]), ULL(rev[n].n[1]));
     n++;
-    v = v->args[1];
+    v = v->args[row == 4 ? 2 : 1];
     row = step_row(v);
   }
-  if (v->kind != VAL_VAR || v->nat >= level)
-    return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a chain of trim, scale, crop and pad over an input");
+  if (v->kind != VAL_VAR || v->nat >= level || (plan->fonts >> v->nat & 1u))
+    return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a chain of trim, scale, crop, pad and burnText over an input");
   plan->input = (uint32_t)v->nat;
   plan->step_count = n;
   for (uint32_t k = 0; k < n; k++)
@@ -302,13 +401,99 @@ static void drop_last_comma(char *text) {
     text[len - 1u] = '\0';
 }
 
+/* Appends the formatted text to BUF (FILTER_MAX bytes) at *N; 0 when it
+   does not fit. */
+static int put(char *buf, size_t *n, const char *fmt, ...) {
+  va_list ap;
+  va_start(ap, fmt);
+  int r = vsnprintf(buf + *n, FILTER_MAX - *n, fmt, ap);
+  va_end(ap);
+  if (r < 0 || (size_t)r >= FILTER_MAX - *n)
+    return 0;
+  *n += (size_t)r;
+  return 1;
+}
+
+/* The escape of the byte C (P16), or NULL when C stays as it is. Level 1
+   (an option value) protects whitespace and puts `\` before `\`, `'` and
+   `:`; then level 2 (the filtergraph) puts `\` before `\`, `'`, `[`, `]`,
+   `,` and `;`. */
+static const char *escape_byte(char c) {
+  switch (c) {
+  case '\\':
+    return "\\\\\\\\";
+  case '\'':
+    return "\\\\\\'";
+  case ':':
+    return "\\\\:";
+  case ' ':
+    return "\\\\ ";
+  case '\t':
+    return "\\\\\t";
+  case '\r':
+    return "\\\\\r";
+  case '\n':
+    return "\\\\\n";
+  case '[':
+    return "\\[";
+  case ']':
+    return "\\]";
+  case ',':
+    return "\\,";
+  case ';':
+    return "\\;";
+  }
+  return NULL;
+}
+
+/* Appends the bytes S[0..LEN) to BUF at *N, escaped at both levels. */
+static int put_escaped(char *buf, size_t *n, const char *s, uint64_t len) {
+  int ok = 1;
+  for (uint64_t i = 0; ok && i < len; i++) {
+    const char *e = escape_byte(s[i]);
+    ok = e == NULL ? put(buf, n, "%c", s[i]) : put(buf, n, "%s", e);
+  }
+  return ok;
+}
+
+/* MEDIA_FONT (B3): drawtext falls back to fontconfig on a fontfile it cannot
+   load, so each Font input (bit i of FONTS) must be a face FreeType opens.
+   *STATUS is the exit status of a failure. */
+static int fonts_open(Machine *m, char *const *inputs, int input_count, uint64_t fonts, int *status) {
+  FT_Library lib = NULL;
+  int ok = 1;
+  *status = 2;
+  if (fonts == 0)
+    return 1;
+  if (FT_Init_FreeType(&lib) != 0)
+    return diag_fail(m->diag, "MEDIA_FONT", NULL, "cannot start FreeType");
+  for (int i = 0; ok && i < input_count; i++) {
+    FT_Face face = NULL;
+    if (fonts >> i & 1u) {
+      ok = FT_New_Face(lib, inputs[i], 0, &face) == 0;
+      if (ok)
+        FT_Done_Face(face);
+      else
+        diag_fail(m->diag, "MEDIA_FONT", NULL, "%s is not a font FreeType can open", inputs[i]);
+    }
+  }
+  FT_Done_FreeType(lib);
+  return ok;
+}
+
 /* Restricts the position domain of S by each trim and follows the frame size
    through each spatial step, innermost first. VF and AF get the reference
    filter chains: each trim counts frames and samples relative to its own
-   input (D2). SF gets the spatial steps alone. An empty domain (D3), a crop
+   input (D2). SF gets the spatial steps alone. A text step puts one drawtext
+   per entry in VF, with the window of the entry relative to the step input
+   (an entry outside the domain is left out), and the same drawtext with no
+   enable in OUT->burns, at its slot of SF. An empty domain (D3), a crop
    outside its frame and a pad that does not hold its frame are refused. */
-static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s, char *vf, char *af, char *sf, Cut *out) {
+static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s, char *const *inputs, char *vf, char *af, char *sf, Cut *out) {
   const AVCodecParameters *par = s->fmt->streams[s->vs]->codecpar;
+  char draw[FILTER_MAX];
+  int ok = 1;
+  out->burn_count = 0;
   uint64_t dlo = 0;
   uint64_t dhi = s->frames - 1u;
   uint64_t w = (uint64_t)par->width;
@@ -368,13 +553,35 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
       w = n[0];
       h = n[1];
       break;
+    case STEP_TEXT:
+      for (uint32_t i = p->steps[k].e0; ok && i < p->steps[k].e1; i++) {
+        const TextEntry *t = &p->entries[i];
+        const char *fp = inputs[n[0]];
+        uint64_t lo = t->lo > dlo ? t->lo : dlo;
+        uint64_t hi = t->hi < dhi ? t->hi : dhi;
+        size_t dn = 0;
+        if (lo > hi)
+          continue;
+        ok = put(draw, &dn, "drawtext=fontfile=") && put_escaped(draw, &dn, fp, strlen(fp)) && put(draw, &dn, ":text=")
+             && put_escaped(draw, &dn, t->bytes, t->len)
+             && put(draw, &dn, ":expansion=none:fontsize=%llu:fontcolor=0x%06llx:x=%llu:y=%llu", ULL(n[1]), ULL(n[2]), ULL(n[3]), ULL(n[4]))
+             && put(vf, &vn, "%s:enable='between(n,%llu,%llu)',", draw, ULL(lo - dlo), ULL(hi - dlo));
+        const char *copy = ok ? arena_strndup(m->arena, draw, dn) : NULL;
+        if (ok && copy == NULL)
+          return diag_fail(m->diag, "OOM", NULL, "no memory for the text of %s", entry);
+        if (ok)
+          out->burns[out->burn_count++] = (Burn){lo, hi, sn, copy};
+      }
+      spatial = 0;
+      break;
     }
-    vn += (size_t)snprintf(vf + vn, FILTER_MAX - vn, "%s", text);
-    if (spatial)
-      sn += (size_t)snprintf(sf + sn, FILTER_MAX - sn, "%s", text);
+    ok = ok && put(vf, &vn, "%s", text) && (!spatial || put(sf, &sn, "%s", text));
+    if (!ok)
+      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "a filter chain is longer than %u bytes", FILTER_MAX);
   }
   if (trims == 0) {
-    snprintf(vf + vn, FILTER_MAX - vn, "setpts=PTS-STARTPTS");
+    if (!put(vf, &vn, "setpts=PTS-STARTPTS"))
+      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "a filter chain is longer than %u bytes", FILTER_MAX);
     snprintf(af, FILTER_MAX, "asetpts=PTS-STARTPTS");
   }
   drop_last_comma(vf);
@@ -395,29 +602,43 @@ static int prepare(Machine *m, const char *entry, char *const *inputs, int input
   src->vs = -1;
   src->as = -1;
   av_log_set_level(AV_LOG_ERROR);
-  if (!plan_of(m, entry, input_count, &plan, status) || !source_open(m, inputs[plan.input], src, status))
+  if (!plan_of(m, entry, input_count, &plan, status) || !fonts_open(m, inputs, input_count, plan.fonts, status)
+      || !source_open(m, inputs[plan.input], src, status))
     return 0;
   *status = 1;
-  if (!cut_of(m, entry, &plan, src, vf, af, sf, cut))
+  if (!cut_of(m, entry, &plan, src, inputs, vf, af, sf, cut))
     return 0;
   *status = (int)plan.input; /* the caller reads the input index here */
   return 1;
 }
 
-/* A shell word stays bare only when every byte is safe in that position. */
-static void shell_path(FILE *out, const char *path) {
-  if (path[0] == '-') fputs("./", out);
-  size_t len = strlen(path);
-  if (len != 0 && strspn(path, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-") == len) {
-    fputs(path, out);
+#define PATH_BARE "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_./:-"
+
+/* A shell word stays bare only when every byte is in BARE; else it is
+   single-quoted, with `'` as `'\''`. */
+static void shell_quote(FILE *out, const char *word, const char *bare) {
+  size_t len = strlen(word);
+  if (len != 0 && strspn(word, bare) == len) {
+    fputs(word, out);
     return;
   }
   fputc('\'', out);
-  for (const char *p = path; *p != '\0'; p++) {
+  for (const char *p = word; *p != '\0'; p++) {
     if (*p == '\'') fputs("'\\''", out);
     else fputc((unsigned char)*p, out);
   }
   fputc('\'', out);
+}
+
+static void shell_path(FILE *out, const char *path) {
+  if (path[0] == '-') fputs("./", out);
+  shell_quote(out, path, PATH_BARE);
+}
+
+/* A filter chain word: the bare set of a path plus `=` and `,`, so every M1
+   chain stays bare. */
+static void shell_word(FILE *out, const char *word) {
+  shell_quote(out, word, PATH_BARE "=,");
 }
 
 int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_count, const char *out_path, FILE *out) {
@@ -431,9 +652,12 @@ int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_c
   if (ok) {
     fputs("ffmpeg -i ", out);
     shell_path(out, inputs[status]);
-    fprintf(out, " -vf %s", vf);
-    if (src.as >= 0)
-      fprintf(out, " -af %s", af);
+    fputs(" -vf ", out);
+    shell_word(out, vf);
+    if (src.as >= 0) {
+      fputs(" -af ", out);
+      shell_word(out, af);
+    }
     fputc(' ', out);
     shell_path(out, out_path);
     fputc('\n', out);
@@ -513,7 +737,7 @@ static AVStream *add_stream(AVFormatContext *oc, const AVCodecContext *enc) {
    -vf graph of the ffmpeg CLI: the buffer takes the decoder frame properties
    at the time base 1/fr, and scale_sws_opts is flags=bicubic (the fftools sws
    default). Returns NULL, or the reason of the failure. */
-static const char *graph_open(Enc *e, const Source *s) {
+static const char *graph_open(Enc *e, const Source *s, const char *chain) {
   const AVCodecContext *dec = e->vdec;
   AVFilterInOut *outs = avfilter_inout_alloc();
   AVFilterInOut *ins = avfilter_inout_alloc();
@@ -543,12 +767,61 @@ static const char *graph_open(Enc *e, const Source *s) {
     ins->filter_ctx = e->bsink;
   }
   ok = ok && outs->name != NULL && ins->name != NULL
-       && avfilter_graph_parse_ptr(e->graph, e->cut.sf, &ins, &outs, NULL) >= 0
+       && avfilter_graph_parse_ptr(e->graph, chain, &ins, &outs, NULL) >= 0
        && avfilter_graph_config(e->graph, NULL) >= 0;
   avfilter_inout_free(&ins);
   avfilter_inout_free(&outs);
   av_free(par);
   return ok ? NULL : "cannot set up the filter graph";
+}
+
+/* The bitset of the burns active at the absolute position P. */
+static uint64_t mask_at(const Cut *c, uint64_t p) {
+  uint64_t mask = 0;
+  for (uint32_t i = 0; i < c->burn_count; i++)
+    mask |= c->burns[i].lo <= p && p <= c->burns[i].hi ? UINT64_C(1) << i : 0u;
+  return mask;
+}
+
+/* The spatial chain with the drawtext of each burn in MASK at its slot, into
+   OUT (FILTER_MAX bytes). 0 when it does not fit. */
+static int chain_of(const Cut *c, uint64_t mask, char *out) {
+  const char *sf = c->sf == NULL ? "" : c->sf;
+  size_t len = strlen(sf);
+  size_t from = 0;
+  size_t n = 0;
+  int ok = 1;
+  out[0] = '\0';
+  for (uint32_t i = 0; ok && i < c->burn_count; i++) {
+    if (!(mask >> i & 1u))
+      continue;
+    /* A slot past the end follows the last spatial step, whose comma SF
+       dropped. */
+    size_t at = c->burns[i].at < len ? c->burns[i].at : len;
+    const char *comma = at > from && c->burns[i].at > len ? "," : "";
+    ok = put(out, &n, "%.*s%s%s,", (int)(at - from), sf + from, comma, c->burns[i].text);
+    from = at;
+  }
+  ok = ok && put(out, &n, "%s", sf + from);
+  drop_last_comma(out);
+  return ok;
+}
+
+/* Drains and frees the live graph, then sets up the graph of MASK (none when
+   its chain is empty). The filters are pointwise and stateless, so a new
+   graph does not change the pixels (P9-P14). */
+static int filter_frame(Enc *e, AVFrame *f);
+static int graph_switch(Enc *e, uint64_t mask) {
+  int r = e->graph == NULL ? 0 : filter_frame(e, NULL);
+  avfilter_graph_free(&e->graph);
+  e->bsrc = NULL;
+  e->bsink = NULL;
+  e->mask = mask;
+  if (r < 0)
+    return r;
+  if (!chain_of(&e->cut, mask, e->chain))
+    return AVERROR(EINVAL);
+  return e->chain[0] == '\0' || graph_open(e, e->src, e->chain) == NULL ? 0 : AVERROR(EINVAL);
 }
 
 /* Opens the decoders, the graph, the encoders, the muxer and the output file.
@@ -560,7 +833,12 @@ static const char *enc_open(Enc *e, const Source *s, const char *path, const cha
   e->adec = s->as < 0 ? NULL : open_decoder(s->fmt->streams[s->as]);
   if (e->vdec == NULL || (s->as >= 0 && e->adec == NULL))
     return "cannot open a decoder";
-  const char *why = e->cut.sf == NULL || e->cut.sf[0] == '\0' ? NULL : graph_open(e, s);
+  /* Preserve container SAR when the first frame has no active text graph. */
+  e->vdec->sample_aspect_ratio = av_guess_sample_aspect_ratio(s->fmt, s->fmt->streams[s->vs], NULL);
+  e->mask = mask_at(&e->cut, e->cut.keep.lo);
+  if (!chain_of(&e->cut, e->mask, e->chain))
+    return "a filter chain is too long";
+  const char *why = e->chain[0] == '\0' ? NULL : graph_open(e, s, e->chain);
   if (why != NULL)
     return why;
   e->venc = open_encoder(e->oc, AVMEDIA_TYPE_VIDEO, path, e->vdec, e->bsink, s->fr);
@@ -647,16 +925,19 @@ static int filter_frame(Enc *e, AVFrame *f) {
 }
 
 /* Each kept frame gets pts = its rank in the cut (O-2, setpts=PTS-STARTPTS),
-   then goes through the spatial steps, if any. */
+   then goes through the graph of its active burns, if any. */
 static int video_frames(Enc *e) {
   int r = 0;
   while (r >= 0 && (r = avcodec_receive_frame(e->vdec, e->frame)) >= 0) {
     uint64_t p = e->position++;
     if (p >= e->cut.keep.lo && p <= e->cut.keep.hi) {
+      uint64_t mask = mask_at(&e->cut, p);
       e->frame->pts = (int64_t)(p - e->cut.keep.lo);
       e->frame->duration = 1;
       e->frame->time_base = e->venc->time_base;
-      r = e->graph == NULL ? video_out(e, e->frame) : filter_frame(e, e->frame);
+      r = mask == e->mask ? 0 : graph_switch(e, mask);
+      if (r >= 0)
+        r = e->graph == NULL ? video_out(e, e->frame) : filter_frame(e, e->frame);
     }
     av_frame_unref(e->frame);
   }
@@ -763,6 +1044,7 @@ static int encode(Machine *m, const Source *s, const Cut *cut, const char *path)
   Enc e;
   memset(&e, 0, sizeof e);
   e.cut = *cut;
+  e.src = s;
   const char *why = enc_open(&e, s, path, temporary);
   if (why == NULL && enc_run(&e, s) < 0)
     why = "an encode step failed";

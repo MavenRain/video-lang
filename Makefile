@@ -4,7 +4,7 @@ CC ?= cc
 # The FFmpeg pin (ruling R2): its libav* for langc AND its ffmpeg CLI for the gate.
 FFMPEG_PREFIX ?= /opt/homebrew/opt/ffmpeg-full
 FFMPEG = $(FFMPEG_PREFIX)/bin/ffmpeg
-FFMPEG_LIBS = libavfilter libavformat libavcodec libswscale libswresample libavutil
+FFMPEG_LIBS = libavfilter libavformat libavcodec libswscale libswresample libavutil freetype2
 FFMPEG_PC = PKG_CONFIG_PATH=$(FFMPEG_PREFIX)/lib/pkgconfig pkg-config
 FFMPEG_CFLAGS := $(shell $(FFMPEG_PC) --cflags $(FFMPEG_LIBS))
 FFMPEG_LDLIBS := $(shell $(FFMPEG_PC) --libs $(FFMPEG_LIBS))

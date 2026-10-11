@@ -11,3 +11,15 @@ frame 20 space.lang frame av.mp4
 twice 50 space.lang twice av.mp4
 chain 20 space.lang chain av.mp4
 vspace 20 space.lang small v.mp4
+hello 50 text.lang hello av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+late 20 text.lang late av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+early 20 text.lang early av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+around 50 text.lang around av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+odd 50 text.lang odd av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+overlap 20 text.lang overlap av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+meta 50 text.lang meta av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+utf8 50 text.lang utf8 av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+clipped 50 text.lang clipped av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+outside 20 text.lang outside av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+blank 50 text.lang blank av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+vtext 20 text.lang late v.mp4 /System/Library/Fonts/Supplemental/Arial.ttf

@@ -1,0 +1,1 @@
+ffmpeg -i av.mp4 -vf 'drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=Hi:expansion=none:fontsize=32:fontcolor=0x10e020:x=11:y=7:enable='\''between(n,0,49)'\'',setpts=PTS-STARTPTS' -af asetpts=PTS-STARTPTS ref.mp4

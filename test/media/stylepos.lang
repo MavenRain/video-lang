@@ -1,0 +1,1 @@
+def posBig : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 16385 20) (cons (pair (interval 5 9) "Hi") nil) v

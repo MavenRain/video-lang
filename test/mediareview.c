@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <libavutil/opt.h>
 #include "front/check.h"
 #include "front/front.h"
 #include "../src/media.c"
@@ -59,6 +60,38 @@ static int frame_hashes(const char *ffmpeg, const char *input, const char *outpu
     "-map", "0", "-f", "framemd5", (char *)output, NULL};
   return child(argv) == 0;
 }
+static void text_escape_cases(const char *dir) {
+  static const char *texts[] = {" leading", "trailing ", "  ", "", "  a:b,c'd\\e%f[g];h=i \"j\"  "};
+  const char *font = "/System/Library/Fonts/Supplemental/Arial.ttf";
+  char spaced_font[1024];
+  snprintf(spaced_font, sizeof spaced_font, "%s/font.ttf \t\n", dir);
+  int linked = symlink(font, spaced_font) == 0;
+  expect("make font with trailing whitespace", linked);
+  for (unsigned i = 0; i < sizeof texts / sizeof texts[0] + 1u; i++) {
+    const char *text = i < sizeof texts / sizeof texts[0] ? texts[i] : "Hi";
+    const char *path = i < sizeof texts / sizeof texts[0] ? font : spaced_font;
+    char chain[FILTER_MAX];
+    size_t n = 0;
+    int ok = put(chain, &n, "drawtext=fontfile=") && put_escaped(chain, &n, path, strlen(path))
+      && put(chain, &n, ":text=") && put_escaped(chain, &n, text, strlen(text))
+      && put(chain, &n, ":expansion=none:fontsize=32");
+    AVFilterGraph *graph = avfilter_graph_alloc();
+    AVFilterInOut *ins = NULL, *outs = NULL;
+    ok = ok && graph != NULL && avfilter_graph_parse2(graph, chain, &ins, &outs) >= 0;
+    uint8_t *actual_text = NULL, *actual_font = NULL;
+    ok = ok && graph->nb_filters == 1u
+      && av_opt_get(graph->filters[0]->priv, "text", 0, &actual_text) >= 0
+      && av_opt_get(graph->filters[0]->priv, "fontfile", 0, &actual_font) >= 0
+      && actual_text != NULL && actual_font != NULL
+      && strcmp((const char *)actual_text, text) == 0 && strcmp((const char *)actual_font, path) == 0;
+    expect(i < sizeof texts / sizeof texts[0] ? "drawtext preserves text bytes" : "drawtext preserves font path bytes", ok);
+    av_free(actual_text); av_free(actual_font);
+    avfilter_inout_free(&ins); avfilter_inout_free(&outs);
+    avfilter_graph_free(&graph);
+  }
+  if (linked) unlink(spaced_font);
+}
+
 static void spatial_sar_cases(const char *ffmpeg, const char *dir) {
   char input[1088], ours[1088], reference[1088], ours_md5[1088], reference_md5[1088];
   snprintf(input, sizeof input, "%s/sar.mkv", dir);
@@ -69,14 +102,18 @@ static void spatial_sar_cases(const char *ffmpeg, const char *dir) {
   const char *program =
     "def small : Video -> Video := fun (v : Video) => scale (res 160 120) (trim (interval 10 29) v)\n"
     "def box : Video -> Video := fun (v : Video) => crop (rect 40 20 160 120) v\n"
-    "def frame : Video -> Video := fun (v : Video) => pad (padSpec 400 300 40 30 1056816) v\n";
-  const char *entries[] = {"small", "box", "frame"};
-  const char *names[] = {"scale preserves container SAR", "crop preserves container SAR", "pad preserves container SAR"};
+    "def frame : Video -> Video := fun (v : Video) => pad (padSpec 400 300 40 30 1056816) v\n"
+    "def textFirst : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 0 1) \"Hi\") nil) v\n"
+    "def textLater : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 5 9) \"Hi\") nil) v\n"
+    "def textOutside : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 100 110) \"Hi\") nil) v\n";
+  const char *entries[] = {"small", "box", "frame", "textFirst", "textLater", "textOutside"};
+  const char *names[] = {"scale preserves container SAR", "crop preserves container SAR", "pad preserves container SAR",
+    "first-frame text preserves container SAR", "later text preserves container SAR", "out-of-domain text preserves container SAR"};
   Arena arena; Diag diag; Machine m; DeclList decls;
   arena_init(&arena, (size_t)64 << 20); diag_init(&diag);
   int loaded = front_load(&arena, "spatial-sar.lang", program, strlen(program), &decls, &diag)
     && check_program(&arena, &decls, &m, &diag);
-  for (unsigned i = 0; i < 3; i++) {
+  for (unsigned i = 0; i < sizeof entries / sizeof entries[0]; i++) {
     /* FFV1 leaves the decoder SAR unknown; Matroska supplies the display SAR. */
     char *fixture_argv[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
       i == 0 ? "testsrc=size=319x239:rate=25:duration=2" : "testsrc2=size=320x240:rate=25:duration=2",
@@ -85,15 +122,16 @@ static void spatial_sar_cases(const char *ffmpeg, const char *dir) {
     FILE *command = ok ? tmpfile() : NULL;
     if (command == NULL) ok = 0;
     if (ok) {
-      char *inputs[] = {input};
+      char *inputs[] = {input, "/System/Library/Fonts/Supplemental/Arial.ttf"};
+      int input_count = i < 3u ? 1 : 2;
       diag_init(&diag);
-      ok = media_ffmpeg(&m, entries[i], inputs, 1, reference, command) == 0;
+      ok = media_ffmpeg(&m, entries[i], inputs, input_count, reference, command) == 0;
       rewind(command);
       char line[8192];
       size_t n = fread(line, 1, sizeof line - 1u, command);
       line[n] = '\0';
       char *argv[] = {"sh", "-c", line, NULL};
-      ok = ok && child(argv) == 0 && media_build(&m, entries[i], inputs, 1, ours) == 0
+      ok = ok && child(argv) == 0 && media_build(&m, entries[i], inputs, input_count, ours) == 0
         && frame_hashes(ffmpeg, ours, ours_md5) && frame_hashes(ffmpeg, reference, reference_md5)
         && same_file(ours_md5, reference_md5);
     }
@@ -251,7 +289,7 @@ int main(void) {
   if (old == NULL) return 1;
   fputs("keep the existing output", old);
   if (fclose(old) != 0) return 1;
-  Cut cut = {{0, src.frames - 1u}, 0, INT64_MAX, NULL};
+  Cut cut = {{0, src.frames - 1u}, 0, INT64_MAX, NULL, {{0, 0, 0, NULL}}, 0};
   status = encode(&m, &src, &cut, saved);
   old = fopen(saved, "rb");
   char bytes[64] = {0};
@@ -260,6 +298,7 @@ int main(void) {
   source_close(&src);
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
+  text_escape_cases(dir);
   plan_cases(input);
   remove(input); remove(fractional); remove(saved); rmdir(dir);
   printf("media IO regressions: %u checked, %u failures\n", checked, failed);

@@ -11,3 +11,11 @@ FRAME_OFFSET 1 oddoffset.lang oddOffset av.mp4
 PAD_COLOR 1 bigcolor.lang bigColor av.mp4
 CROP_RANGE 1 space.lang wide av.mp4
 PAD_RANGE 1 space.lang shift av.mp4
+TEXT_CHAR 1 textctl.lang main av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+TEXT_CHAR 1 textutf8.lang main av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+STYLE_SIZE 1 stylesize.lang sizeZero av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+STYLE_COLOR 1 stylecolor.lang colorBig av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+STYLE_POS 1 stylepos.lang posBig av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+MEDIA_FONT 2 text.lang hello av.mp4 missing.ttf
+MEDIA_FONT 2 text.lang hello av.mp4 av.mp4
+TEXT_LIMIT 1 text.lang many av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf

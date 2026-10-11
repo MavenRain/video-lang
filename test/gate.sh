@@ -162,6 +162,12 @@ src=testsrc2=size=320x240:rate=25:duration=2
   ff -f lavfi -i "$src" -c:v libx264 -pix_fmt yuv420p v.mp4 &&
   ff -f lavfi -i "$src" -vf "select='not(eq(n,5))'" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p vfr.mp4) \
   || { echo "FAIL media: the pin did not make the fixtures"; fail=$((fail + 1)); }
+# The text rows bind the gate font (M2-R2); it is never committed.
+font=/System/Library/Fonts/Supplemental/Arial.ttf
+[ -r "$font" ] || { echo "FAIL media: the gate font $font is missing"; fail=$((fail + 1)); }
+# TEXT_CHAR rows of test/media/refuse.txt: a control byte and invalid UTF-8.
+printf 'def main : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 0 0 0) (cons (pair (interval 0 1) "a\001b") nil) v\n' >"$media/textctl.lang"
+printf 'def main : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 0 0 0) (cons (pair (interval 0 1) "\300\200") nil) v\n' >"$media/textutf8.lang"
 set -f
 
 # Each line of test/media/expect.txt is `NAME FRAMES PROG MAIN IN...`. The
@@ -172,7 +178,7 @@ while read -r name frames prog entry inputs; do
   (cd "$media" && rm -f ours.mp4 ref.mp4 &&
     line=$("$kit/build/langc" ffmpeg "$kit/test/media/$prog" "$entry" $inputs -o ref.mp4) &&
     [ "$line" = "$(cat "$kit/test/ffmpeg/$name.cmd")" ] &&
-    set -- $line && shift && ff "$@" &&
+    eval "set -- $line" && shift && ff "$@" &&
     "$kit/build/langc" build "$kit/test/media/$prog" "$entry" $inputs -o ours.mp4 &&
     fm ours.mp4 >ours.md5 && fm ref.mp4 >ref.md5 && cmp -s ours.md5 ref.md5 &&
     [ "$(rg -c '^0,' ours.md5)" = "$frames" ]) \
@@ -180,35 +186,38 @@ while read -r name frames prog entry inputs; do
 done <test/media/expect.txt
 echo "media R1: $(wc -l <test/media/expect.txt | tr -d ' ') checked"
 
-# Each line of test/media/laws.txt is `KIND PROG LEFT RIGHT IN` (D1). exact:
+# Each line of test/media/laws.txt is `KIND PROG LEFT RIGHT IN...` (D1). exact:
 # the two builds have the same framemd5 (trim i (trim i v) = trim i v; trim i
 # (trim j v) = trim (i cap j) v; trim commutes with scale, crop and pad;
 # compose and idFilter make a monoid). shape: the framemd5 lines are equal
 # without the hash column (P3: scale r2 (scale r1 v) and scale r2 v have the
 # same frame count, sizes and times but not the same pixels; never a rewrite).
-while read -r kind prog left right input; do
+while read -r kind prog left right inputs; do
   case $kind in
     exact) cols=6 ;;
     shape) cols=5 ;;
     *) cols=0 ;;
   esac
   (cd "$media" && [ "$cols" -ne 0 ] &&
-    "$kit/build/langc" build "$kit/test/media/$prog" "$left" "$input" -o left.mp4 &&
-    "$kit/build/langc" build "$kit/test/media/$prog" "$right" "$input" -o right.mp4 &&
+    "$kit/build/langc" build "$kit/test/media/$prog" "$left" $inputs -o left.mp4 &&
+    "$kit/build/langc" build "$kit/test/media/$prog" "$right" $inputs -o right.mp4 &&
     fm left.mp4 >left.all && fm right.mp4 >right.all &&
     cut -d, -f1-$cols left.all >left.md5 && cut -d, -f1-$cols right.all >right.md5 &&
     cmp -s left.md5 right.md5) \
-    || { echo "FAIL media law $kind $left = $right on $input"; fail=$((fail + 1)); }
+    || { echo "FAIL media law $kind $left = $right on $inputs"; fail=$((fail + 1)); }
 done <test/media/laws.txt
 echo "media laws: $(wc -l <test/media/laws.txt | tr -d ' ') checked"
 
 # Each line of test/media/refuse.txt is `CODE STATUS PROG MAIN IN...`: build and
 # ffmpeg exit STATUS with `langc: CODE: ` on stderr, no stdout and no file (D3).
+# A PROG that is not in test/media is a generated file in $media.
 while read -r code want prog entry inputs; do
+  path="$kit/test/media/$prog"
+  [ -e "$path" ] || path="$media/$prog"
   for verb in build ffmpeg; do
     status=0
     (cd "$media" && rm -f no.mp4 &&
-      "$kit/build/langc" $verb "$kit/test/media/$prog" "$entry" $inputs -o no.mp4 >out 2>err) || status=$?
+      "$kit/build/langc" $verb "$path" "$entry" $inputs -o no.mp4 >out 2>err) || status=$?
     case "$status:$(head -n 1 "$media/err"):$(wc -c <"$media/out" | tr -d ' '):$([ -e "$media/no.mp4" ] && echo file)" in
       "$want:langc: $code: "*":0:") ;;
       *) echo "FAIL media $verb $code: want exit $want, $code, no stdout and no file, got exit $status"; fail=$((fail + 1)) ;;
