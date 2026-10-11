@@ -6,6 +6,7 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <libavutil/avstring.h>
 #include <libavutil/opt.h>
 #include "front/check.h"
 #include "front/front.h"
@@ -90,6 +91,57 @@ static void text_escape_cases(const char *dir) {
     avfilter_graph_free(&graph);
   }
   if (linked) unlink(spaced_font);
+}
+
+/* The text of the one drawtext of CHAIN is WANT after the graph parses. */
+static int parsed_text(const char *chain, const char *want) {
+  AVFilterGraph *graph = avfilter_graph_alloc();
+  AVFilterInOut *ins = NULL, *outs = NULL;
+  uint8_t *text = NULL;
+  int ok = graph != NULL && avfilter_graph_parse2(graph, chain, &ins, &outs) >= 0 && graph->nb_filters == 1u
+    && av_opt_get(graph->filters[0]->priv, "text", 0, &text) >= 0 && text != NULL && strcmp((const char *)text, want) == 0;
+  av_free(text);
+  avfilter_inout_free(&ins); avfilter_inout_free(&outs);
+  avfilter_graph_free(&graph);
+  return ok;
+}
+
+/* Each byte that is syntax at level 1 (an option value: av_get_token on ":")
+   or level 2 (the filtergraph: av_get_token on "[],;"), at both ends and in
+   the middle of a text that sits between two options, as in the chain. Level
+   2 must keep the whole option list, level 1 must give back the bytes up to
+   the next option, and so must the parsed graph. Other bytes stay as they
+   are. */
+static const struct {
+  char c;
+  const char *escape;
+} ESCAPES[] = {
+  {'\\', "\\\\\\\\"}, {'\'', "\\\\\\'"}, {':', "\\\\:"}, {' ', "\\\\ "}, {'\t', "\\\\\t"}, {'\r', "\\\\\r"},
+  {'\n', "\\\\\n"}, {'[', "\\["}, {']', "\\]"}, {',', "\\,"}, {';', "\\;"},
+  {'a', NULL}, {'%', NULL}, {'=', NULL}, {'"', NULL}, {'{', NULL},
+};
+
+static void escaper_cases(void) {
+  static char value[FILTER_MAX], chain[FILTER_MAX];
+  for (size_t i = 0; i < sizeof ESCAPES / sizeof ESCAPES[0]; i++) {
+    const char c = ESCAPES[i].c;
+    const char text[4] = {c, 'a', c, '\0'};
+    const char *e = escape_byte(c);
+    size_t vn = 0, cn = 0;
+    int ok = (e == NULL ? ESCAPES[i].escape == NULL : ESCAPES[i].escape != NULL && strcmp(e, ESCAPES[i].escape) == 0)
+      && put(value, &vn, "t=") && put_escaped(value, &vn, text, 3u) && put(value, &vn, ":e");
+    const char *p = value;
+    char *level2 = ok ? av_get_token(&p, "[],;") : NULL;
+    const char *q = level2 != NULL ? level2 + 2 : NULL;
+    char *level1 = level2 != NULL && *p == '\0' && strncmp(level2, "t=", 2) == 0 ? av_get_token(&q, ":") : NULL;
+    ok = ok && level1 != NULL && strcmp(q, ":e") == 0 && strcmp(level1, text) == 0
+      && put(chain, &cn, "drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=")
+      && put_escaped(chain, &cn, text, 3u) && put(chain, &cn, ":expansion=none") && parsed_text(chain, text);
+    av_free(level2); av_free(level1);
+    char name[64];
+    snprintf(name, sizeof name, "escape of byte 0x%02x at both levels", (unsigned)(unsigned char)c);
+    expect(name, ok);
+  }
 }
 
 static void spatial_sar_cases(const char *ffmpeg, const char *dir) {
@@ -216,6 +268,124 @@ static void plan_cases(const char *input) {
   }
   arena_release(&arena);
 }
+
+/* burnText windows on the 50-frame fixture: an entry is clamped to the
+   positions of its step input (the enable counts from the input start, the
+   burn keeps absolute positions) and left out when none of them is in it.
+   A burn sits at its slot of the spatial chain. */
+#define DRAW(t, lo, hi) \
+  ":text=" t ":expansion=none:fontsize=32:fontcolor=0xffffff:x=10:y=20:enable='between(n," lo "," hi ")'"
+#define BURN(name, track, v) \
+  "def " name " : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (st f) " track " " v "\n"
+#define ONE(lo, hi, t) "(cons (pair (interval " lo " " hi ") \"" t "\") nil)"
+static const char TEXT_PROGRAM[] =
+  "def st : Font -> Style := fun (f : Font) => style f 32 16777215 10 20\n"
+  BURN("low", ONE("5", "14", "AA"), "(trim (interval 10 29) v)")
+  BURN("high", ONE("25", "40", "AA"), "(trim (interval 10 29) v)")
+  BURN("exact", ONE("10", "29", "AA"), "(trim (interval 10 29) v)")
+  BURN("tail", ONE("45", "99", "AA"), "v")
+  BURN("above", ONE("30", "45", "AA"), "(trim (interval 10 29) v)")
+  BURN("below", ONE("0", "9", "AA"), "(trim (interval 10 29) v)")
+  BURN("mixed", "(cons (pair (interval 0 9) \"AA\") " ONE("12", "15", "BB") ")", "(trim (interval 10 29) v)")
+  "def slot : Video -> Font -> Video := fun (v : Video) (f : Font) =>"
+  " pad (padSpec 200 160 20 20 0) (burnText (st f) " ONE("5", "9", "AA") " (scale (res 160 120) v))\n"
+  BURN("last", ONE("5", "9", "AA"), "(scale (res 160 120) v)");
+
+static const struct {
+  const char *name;
+  const char *entry;
+  uint32_t count;
+  uint64_t lo;
+  uint64_t hi;
+  size_t at;
+  const char *draw;
+  const char *sf;
+} WINDOW_ROWS[] = {
+  {"window clamped at the low end", "low", 1, 10, 14, 0, DRAW("AA", "0", "4"), ""},
+  {"window clamped at the high end", "high", 1, 25, 29, 0, DRAW("AA", "15", "19"), ""},
+  {"window on the exact domain", "exact", 1, 10, 29, 0, DRAW("AA", "0", "19"), ""},
+  {"window clamped to the last frame", "tail", 1, 45, 49, 0, DRAW("AA", "45", "49"), ""},
+  {"window one past the domain is left out", "above", 0, 0, 0, 0, NULL, ""},
+  {"window one before the domain is left out", "below", 0, 0, 0, 0, NULL, ""},
+  {"only the entry in the domain stays", "mixed", 1, 12, 15, 0, DRAW("BB", "2", "5"), ""},
+  {"burn between two spatial steps", "slot", 1, 5, 9, 14, DRAW("AA", "5", "9"),
+   "scale=160:120,pad=200:160:20:20:color=0x000000"},
+  {"burn after the last spatial step", "last", 1, 5, 9, 14, DRAW("AA", "5", "9"), "scale=160:120"},
+};
+
+static unsigned count_of(const char *s, const char *word) {
+  unsigned k = 0;
+  for (const char *p = strstr(s, word); p != NULL; p = strstr(p + 1, word))
+    k++;
+  return k;
+}
+
+static void window_cases(const char *input) {
+  static char vf[FILTER_MAX], af[FILTER_MAX], sf[FILTER_MAX];
+  Arena arena; Diag diag; Machine m; DeclList decls;
+  char *inputs[] = {(char *)input, "/System/Library/Fonts/Supplemental/Arial.ttf"};
+  arena_init(&arena, (size_t)64 << 20); diag_init(&diag);
+  int loaded = front_load(&arena, "text.lang", TEXT_PROGRAM, strlen(TEXT_PROGRAM), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  for (size_t i = 0; i < sizeof WINDOW_ROWS / sizeof WINDOW_ROWS[0]; i++) {
+    Source src;
+    Cut cut;
+    int status = 0;
+    diag_init(&diag);
+    int ok = loaded && prepare(&m, WINDOW_ROWS[i].entry, inputs, 2, &src, vf, af, sf, &cut, &status)
+      && cut.burn_count == WINDOW_ROWS[i].count && count_of(vf, "drawtext=") == WINDOW_ROWS[i].count
+      && strcmp(sf, WINDOW_ROWS[i].sf) == 0;
+    if (ok && WINDOW_ROWS[i].count != 0)
+      ok = cut.burns[0].lo == WINDOW_ROWS[i].lo && cut.burns[0].hi == WINDOW_ROWS[i].hi && cut.burns[0].at == WINDOW_ROWS[i].at
+        && strstr(vf, WINDOW_ROWS[i].draw) != NULL && strstr(cut.burns[0].text, "enable") == NULL;
+    expect(WINDOW_ROWS[i].name, ok);
+    if (loaded)
+      source_close(&src);
+  }
+  arena_release(&arena);
+}
+
+/* Three burns over two spatial steps: A before the scale, B between the
+   steps, C after the crop (a slot past the end of SF, whose last comma is
+   dropped). A mask has bit i when burn i is active at a position. */
+static void mask_cases(void) {
+  static char out[FILTER_MAX];
+  static const struct {
+    uint64_t p;
+    uint64_t mask;
+  } AT[] = {{4, 0}, {5, 1}, {8, 3}, {9, 3}, {10, 2}, {12, 6}, {14, 6}, {15, 4}, {20, 4}, {21, 0}};
+  static const struct {
+    uint64_t mask;
+    const char *chain;
+  } CHAINS[] = {
+    {0, "scale=160:120,crop=80:60:0:0"},
+    {1, "A,scale=160:120,crop=80:60:0:0"},
+    {2, "scale=160:120,B,crop=80:60:0:0"},
+    {4, "scale=160:120,crop=80:60:0:0,C"},
+    {7, "A,scale=160:120,B,crop=80:60:0:0,C"},
+  };
+  Cut c, bare;
+  memset(&c, 0, sizeof c);
+  memset(&bare, 0, sizeof bare);
+  c.sf = "scale=160:120,crop=80:60:0:0";
+  c.burns[0] = (Burn){5, 9, 0, "A"};
+  c.burns[1] = (Burn){8, 14, 14, "B"};
+  c.burns[2] = (Burn){12, 20, 29, "C"};
+  c.burn_count = 3;
+  int at_ok = 1;
+  for (size_t i = 0; i < sizeof AT / sizeof AT[0]; i++)
+    at_ok = at_ok && mask_at(&c, AT[i].p) == AT[i].mask;
+  expect("mask_at sets the burns active at a position", at_ok);
+  int chain_ok = 1;
+  for (size_t i = 0; i < sizeof CHAINS / sizeof CHAINS[0]; i++)
+    chain_ok = chain_ok && chain_of(&c, CHAINS[i].mask, out) && strcmp(out, CHAINS[i].chain) == 0;
+  expect("chain_of puts each burn of the mask at its slot", chain_ok);
+  bare.burns[0] = (Burn){0, 49, 0, "A"};
+  bare.burns[1] = (Burn){0, 49, 0, "B"};
+  bare.burn_count = 2;
+  expect("chain_of with no spatial step", chain_of(&bare, 3, out) && strcmp(out, "A,B") == 0
+    && chain_of(&bare, 0, out) && strcmp(out, "") == 0);
+}
 int main(void) {
   const char *ffmpeg = getenv("FFMPEG");
   if (ffmpeg == NULL) ffmpeg = "ffmpeg";
@@ -300,6 +470,9 @@ int main(void) {
   spatial_sar_cases(ffmpeg, dir);
   text_escape_cases(dir);
   plan_cases(input);
+  escaper_cases();
+  window_cases(input);
+  mask_cases();
   remove(input); remove(fractional); remove(saved); rmdir(dir);
   printf("media IO regressions: %u checked, %u failures\n", checked, failed);
   return failed != 0;

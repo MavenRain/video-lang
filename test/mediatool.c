@@ -119,6 +119,40 @@ static void plan_case(const char *name, const char *entry, int free_width, int w
   arena_release(&arena);
 }
 
+/* x64 nil is a track of 64 entries, x1 (x64 nil) one more. */
+#define TEXT_SOURCE \
+  "def x1 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => cons (pair (interval 0 0) \"x\") t\n" \
+  "def x2 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x1 (x1 t)\n" \
+  "def x4 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x2 (x2 t)\n" \
+  "def x8 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x4 (x4 t)\n" \
+  "def x16 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x8 (x8 t)\n" \
+  "def x32 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x16 (x16 t)\n" \
+  "def x64 : SubtitleTrack -> SubtitleTrack := fun (t : SubtitleTrack) => x32 (x32 t)\n" \
+  "def t64 : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (x64 nil) v\n" \
+  "def t65 : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (x1 (x64 nil)) v\n"
+
+#define FONT_PATH "/System/Library/Fonts/Supplemental/Arial.ttf"
+
+/* ENTRY of TEXT_SOURCE under `langc ffmpeg` with the font FONT and an input
+   that does not exist. The plan and then the font are read before the input
+   opens: an accepted plan with a font gets to MEDIA_INPUT with status 2. */
+static void text_case(const char *name, const char *entry, const char *font, int want, const char *code) {
+  Arena arena;
+  Diag diag;
+  Machine m;
+  char *inputs[] = {"no-such-input.mp4", (char *)font};
+  int status = -1;
+  arena_init(&arena, (size_t)64 << 20);
+  diag_init(&diag);
+  FILE *out = tmpfile();
+  if (out != NULL && load(&arena, &diag, &m, TEXT_SOURCE))
+    status = media_ffmpeg(&m, entry, inputs, 2, "out.mp4", out);
+  expect(name, status == want && diag.code != NULL && strcmp(diag.code, code) == 0, &diag);
+  if (out != NULL)
+    fclose(out);
+  arena_release(&arena);
+}
+
 int main(void) {
   json_case("interval", "def result : Interval := interval 1 3\n",
     "\"value\":{\"lo\":1,\"hi\":3}", NULL);
@@ -198,6 +232,10 @@ int main(void) {
   plan_case("65 steps are refused", "s65", 0, 1, "MEDIA_LIMIT");
   plan_case("a literal res is a plan", "s1", 0, 2, "MEDIA_INPUT");
   plan_case("a non-literal res is refused", "s1", 1, 1, "MEDIA_SHAPE");
+  /* video-lang M2 */
+  text_case("64 track entries are a plan", "t64", FONT_PATH, 2, "MEDIA_INPUT");
+  text_case("65 track entries are refused", "t65", FONT_PATH, 1, "TEXT_LIMIT");
+  text_case("a font input that is not a font is refused", "t64", "test/media/text.lang", 2, "MEDIA_FONT");
   printf("media regressions: %u checked, %u failed\n", checked, failed);
   return failed == 0 ? 0 : 1;
 }
