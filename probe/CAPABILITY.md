@@ -1,14 +1,18 @@
 # Host capability probe: tcc-media
 
-Date: YYYY-MM-DD. Host tree: `<path>` at <commit>, read only. Driver:
-`<host executable>` (built YYYY-MM-DD). <Say if other work loaded the
-machine. Then each wall time is an upper bound.>
+Date: 2026-10-10. Host tree: this repository at commit 2c6e29b, read only.
+Driver: `build/langc` (TinyCC 0.9.28rc, built by `make` on 2026-10-10).
+FFmpeg pin: Homebrew ffmpeg-full 9.0.2 (libavformat 63.1.102). Other work
+ran on the machine at the same time, so each wall time is an upper bound.
 
-To run the probe again: <the command that runs all steps, and the command
-that runs some steps>. Each step runs below `probe/guard.py`, which stops a
-command above <N> MB resident memory or above its time limit. The probe
-writes only below a new temporary directory. The largest process in the
-probe used <N> MB.
+To run the probe again: `make check FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full`
+runs the gate rows, and `make perf FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full`
+runs the 1080p cost rows. `make perf` rejects a measured build peak of
+4000000000 bytes or more (`test/mediaperf.c:151`).
+`probe/guard.py --rss-mb N --timeout S -- COMMAND` stops a command above
+N MB resident memory or above S seconds. The gate writes only below a new
+temporary directory. `make perf` writes its clips to `test/media/perf/`,
+which git ignores. The largest process in the probe used 936312832 bytes.
 
 ## Questions
 
@@ -22,74 +26,188 @@ below. An answer sets the status of a former in `formers/tcc-media.md`.
 | Which recursion does the host accept, and how does it refuse the rest? | 3 | F6, F7 |
 | Which `Nat` primitives exist? Does `Nat` have an eliminator? | 4 | F6, F7 |
 | How does a result leave the host? | 5 | target |
-| What do check and build cost (time and resident memory) at N = 100 and N = 1000? | 6 | all |
+| What do check and build cost (time and resident memory)? | 6 | all |
 | Can a family take a parameter? Can a constructor of such a family appear in a term? | 7 | F4, F12, F15 |
 | Can a program project a Sigma? Does the kernel accept Sigma eta? | 8 | F11 |
 | How does a program use equality: transport, cong, an index type? | 9 | F12, F13 |
 | How does the host report an axiom? | 10 | R2 |
 
+## Probes
+
+The probe programs ran outside this repository. P1 to P4 ran first on
+FFmpeg 8.1.2, then again on the pin. The sections below cite the results on
+the pin.
+
+| Id | Result on the pin |
+|---|---|
+| P1 | TinyCC compiles and links the libav* libraries with plain `pkg-config --cflags --libs` flags. A decode of 50 frames gives each PTS in increasing order. |
+| P2 | Trim 10..29, then `sws_scale` with SWS_BICUBIC: 20 of 20 frames equal `ffmpeg -vf trim=start_frame=10:end_frame=30,scale=160:120`. |
+| P3 | `scale=240:180,scale=160:120` against `scale=160:120`: 0 of 50 frames are equal. |
+| P4 | Two runs of the same ffmpeg encode (libx264, aac, .mp4) give the same bytes. |
+| P5 | The stock Homebrew ffmpeg has no `drawtext` filter. |
+| P6 | TinyCC links libavfilter and libswresample. A graph `crop=160:120:10:20` in process: 50 of 50 frames equal the ffmpeg `crop`. |
+| P7 | Audio trim: 35 of 35 audio frames equal ffmpeg `atrim=start_sample=S:end_sample=E`. S and E count decoded audio values after the AAC priming skip. |
+| P8 | ffmpeg `drawtext` is deterministic: two runs give the same framemd5 and the same file bytes. |
+| P9 | A graph chosen in process by the frame position equals ffmpeg `enable='between(n,5,9)'` on 50 of 50 frames. `between` includes both ends. |
+| P10 | After a trim, the `n` of `drawtext` counts the frames into `drawtext`, from 0. |
+| P11 | In ffmpeg, `drawtext` then `trim` equals `trim` then `drawtext` with `n` moved by the trim start. |
+| P12 | `scale`, then `drawtext`, then `pad` in one graph: 50 of 50 frames equal ffmpeg. |
+| P13 | Text at an odd x and y on yuv420p: 50 of 50 frames equal ffmpeg, and the frames differ from x and y less 1. |
+| P14 | Two text entries on the same frames draw in list order. |
+| P15 | A space and the UTF-8 text `café €5` give equal frames in process and in ffmpeg. |
+| P16 | The escaped `text=` value gives the same frames as `textfile=` with the raw bytes. |
+| B1 | `expansion=normal` with `%{n}`: the frame number is relative, so trim and text do not commute. |
+| B2 | `expansion=normal` with `100%`: ffmpeg stops with "Stray %", exit 234. |
+| B3 | `fontfile=` names a missing file: ffmpeg exits 0 and uses fontconfig. |
+| B4 | No `fontfile`: the frames depend on the fonts of the machine. |
+| B5 | `text=` empty: the frames equal the frames without `drawtext`. |
+| B6 | `fontsize=0`: ffmpeg draws pixels. |
+| B7 | `fontsize` not set: ffmpeg uses 16. |
+| B8 | `fix_bounds=1` moves text that the frame edge clips (50 frames change). |
+| B9 | Text fully outside the frame: the frames equal the frames without `drawtext`. |
+
 ## 1. Commands
 
 | Job | Command | Result |
 | --- | --- | --- |
-| Check | `<command> FILE` | <exit codes and output> |
-| Print normal form | `<command>` | <output> |
-| Build | `<command>` | <output> |
-| Run | `<command>` | <output> |
+| Check | `build/langc check PROG` | Exit 0, or exit 1 and a refusal code (gate rows: parse 17, check 31) |
+| Print normal form | `build/langc eval PROG NAME [ARGS...]` | The value, or `trap` (gate row: evals 29) |
+| Build | `build/langc build PROG MAIN IN... -o OUT` | A media file that the host makes in process with libav* (gate row: media R1 25) |
+| Run | `build/langc ffmpeg PROG MAIN IN... -o OUT` | The ffmpeg command for the same program. The gate runs it as the reference for R1. |
 
-- <Limits of each command, for example one file only.>
-- Not probed: <commands that the probe did not run>.
+- `build/langc build PROG [-o OUT]` writes the JSON document (gate row:
+  json 11).
+- Exit codes: 0 ok, 1 refused, 2 usage or IO (`src/main.c:2`). An `eval`
+  argument refusal (EVAL_ARGS) exits 2 (`test/gate.sh:101`).
+- Each command takes one program file.
+- Not probed: an FFmpeg other than the pin.
 
 ## 2. Several files
 
-<Does the host accept several files or an import form? If not, which order
-must the driver use to join them?>
+The host takes one program file. The grammar has no import form
+(`src/front/parser.c:1`). `make` joins `domain/domain.lang` and
+`domain/video.lang` into `build/domain-all.lang` (`Makefile:34`). Then
+`tcc -run gen/embed.c` puts that file into `build/domain.c`. The host loads
+the domain before the program (`src/front/front.c:13`). Gate row:
+examples 11.
 
 ## 3. Recursion and totality
 
-<Which recursive definitions check. Which calls the host refuses, with the
-exact error line.>
+The host accepts no general recursion. A program repeats work only with
+`fold` (over `Nat`, `List` or a domain family) and with `unfold`, which has
+a step limit (`src/front/check.c:114`). The checker refuses `def rec` with
+"def rec is refused (rule R3); use fold or unfold" (`REFUSE_REC`,
+`src/front/check.c:1523`). It refuses a use of the same or a later
+definition with `REFUSE_REC` (`src/front/check.c:1128`). Gate rows:
+`rec.lang`, `self.lang` and `later.lang` in `test/check/expect.txt`. A
+media program needs no recursion: it is at most 64 steps (`STEP_MAX`,
+`src/media.c:32`, refusal `MEDIA_LIMIT`).
 
 ## 4. Nat
 
-<The primitives. The result of a subtraction below zero. Whether a
-definition can recurse on a `Nat`. The largest value that can leave the
-host.>
+The primitives are `natAdd`, `natSub`, `natMul`, `natEq` and `natLe`
+(`src/front/check.c:120`). `natAdd` and `natMul` trap on overflow.
+`natSub` stops at 0. The largest literal is 18446744073709551615, and a
+larger literal gives `LEX_NAT_RANGE` (`src/front/lexer.c:138`). The
+eliminator is `fold` over `Nat`. A frame position is a `Nat`. A literal
+`interval lo hi` with lo > hi gives `INTERVAL_RANGE`. The media build
+refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
+`src/media.c:278`). Gate rows: the two `trap` rows in
+`test/eval/expect.txt`.
 
 ## 5. How a result leaves the host
 
-<The path of a result from the host to a file: printed text, a module
-export, or a contract.>
+`langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
+process (libavfilter graphs and `sws_scale`) and encodes OUT with the
+default encoders of the container (`src/media.c:694`; libx264 and aac for
+.mp4). It writes a temporary file and renames it to OUT only when the build
+succeeds (`src/media.c:1057`). R1 compares the decoded frames of OUT with
+the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
+(`fm`, `test/gate.sh:158`). R1 does not compare the file bytes. Evidence:
+media R1 25 rows, P4, P8. An input must have yuv420p video
+(`MEDIA_FORMAT`, `src/media.c:367`) and a constant frame rate
+(`VFR_SOURCE`, `src/media.c:337`). Audio is optional; when present, it
+must be fltp with a positive sample rate (`src/media.c:368`).
 
 ## 6. Cost
 
-| Step | N = 100 | N = 1000 |
-| --- | --- | --- |
-| Check | <s>, <MB> | <s>, <MB> |
-| Build | <s>, <MB> | <s>, <MB> |
-| Run | <s>, <MB> | <s>, <MB> |
+N is the clip length (1920x1080, 25 fps), not the program size. The
+programs are in `test/media/perf.lang`. `whole` keeps all frames. `chain`
+does trim, crop, scale, pad and burnText with two text entries. Each cell is the wall time and
+the peak resident memory (MB = 1000000 bytes) from `make perf`.
+
+| Step | s10, 250 frames | s20, 500 frames | s60, 1500 frames |
+| --- | --- | --- | --- |
+| Build `whole` | 1.27 s, 873 MB | 2.55 s, 885 MB | 6.50 s, 922 MB |
+| Build `chain` | 1.04 s, 892 MB | 1.81 s, 904 MB | 5.46 s, 936 MB |
+| ffmpeg `whole` | 1.47 s, 880 MB | 2.37 s, 884 MB | 6.61 s, 887 MB |
+| ffmpeg `chain` | 0.98 s, 893 MB | 1.83 s, 897 MB | 5.28 s, 901 MB |
+
+The peak grows with the compressed input bytes, not with the decoded
+frames. From s10 to s60 the `whole` build grew by 49299456 bytes, and the
+input grew by 36231023 bytes. One decoded 1080p yuv420p frame is 3110400
+bytes, so a build that holds the frames grows by about 3 MB for each frame.
+Not probed: the cost of `check` on a large program.
 
 ## 7. Parametric families
 
-<Whether a family can take a type parameter, and whether its constructors can
-appear in a term. Name the probe file.>
+The grammar lets a family take parameters (`src/front/parser.c:4`). The
+only family with a parameter is `Lot (size : Nat)` (`domain/domain.lang:8`).
+Its constructor appears in a term: `makeLot 3 250`
+(`examples/inventory.lang:9`, gate row `inventory lot` in evals). A
+program cannot declare a family (`REFUSE_DATA`,
+`src/front/check.c:1519`). `SubtitleTrack` is a definition, not a family:
+`List (Prod Interval Text)` (`domain/video.lang:12`). `Video` and `Font`
+have no constructor. Their values come only from the inputs of a media
+entry (`MEDIA_TYPE`, `src/media.c:255`).
 
 ## 8. Sigma projection and eta
 
-<Whether `witness` and `payload` (or `.1` and `.2`) check, whether a Sigma
-pattern parses, and whether the kernel identifies `pack (witness s)
-(payload s)` with `s`.>
+`pack`, `witness` and `payload` check (`src/front/check.c:102`). The kernel
+accepts Sigma eta (`src/front/eval.c:1114`, `sigmaEta` in
+`examples/laws.lang:18`). A wrong swap gives `TYPE_REFL` (gate row
+`bad-eta.lang` in `test/check/expect.txt`). No media type uses a Sigma.
 
 ## 9. Equality
 
-<How a program writes `Eq`, `transport` and `cong`. Whether one family can
-serve each index type.>
+The front end has `Eq`, `refl`, `symm`, `trans`, `cong` and `transport`
+(`src/front/check.c:91`). `examples/equality.lang` uses `transport` and
+`cong`, and `test/json/equality.json` is its golden file. For media, two
+programs are equal when their outputs give the same framemd5 lines. Of
+the 16 media law rows, 14 compare the full lines (`exact`). Two rows
+compare only the lines without the hash column (`shape`): `twice` versus
+`once`, and `scaleText` versus `textScale` (`test/media/laws.txt:11`,
+`:16`). Neither scale composition (P3) nor moving scale past burnText
+preserves pixels. Passing these two shape rows does not establish pixel
+equality.
 
 ## 10. Axiom detection
 
-<The command that lists the axioms of a file. Its output for a file with no
-axiom and for a file with one axiom.>
+The host refuses each axiom at check: "an axiom has no proof (rule R2)"
+(`REFUSE_AXIOM`, `src/front/check.c:1521`). Each command runs the check
+first (`src/main.c:133`), so `build` and `ffmpeg` also refuse an axiom
+with exit 1. No command lists the axioms of a file. Gate row: `axiom.lang`
+in `test/check/expect.txt`.
 
-## Consequences for M0
+## Consequences
 
-1. <One rule for the build that a section above forces. Cite the section.>
+1. R1 compares decoded frames over all streams, never the file bytes
+   (section 5, P4, P8).
+2. The compiler never rewrites a program by scale composition or by
+   moving scale past burnText (section 9, P3).
+3. Each `drawtext` gets `expansion=none` (B1, B2), a `fontfile` (B3, B4)
+   and a `fontsize` (B7), and never `fix_bounds` (B8).
+4. The build refuses a font that FreeType cannot open before it makes a
+   graph (`MEDIA_FONT`), because ffmpeg uses fontconfig and exits 0 (B3).
+5. `STYLE_SIZE` refuses the size 0 (B6). Text at an odd position (P13) and
+   text outside the frame (B9) are allowed.
+6. Text entries draw in list order (P14). An empty track or an empty Text
+   changes no pixel (B5).
+7. In process, the build picks the text graph by the absolute frame
+   position. The ffmpeg command uses `enable='between(n,R,Q)'` with `n`
+   relative to the `drawtext` input (P9, P10, P11).
+8. The ffmpeg command escapes text and font paths on two levels (P16).
+9. Audio trim counts decoded audio values after the AAC priming skip (P7).
+10. Peak memory must stay below 4000000000 bytes at 1080p. The cap ladder
+    in `make perf` finds a build that holds frames before the s60 run
+    (section 6).
