@@ -3,3 +3,4 @@ scratch/
 *.tmp
 __pycache__/
 build/
+test/media/perf/

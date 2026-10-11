@@ -1,0 +1,6 @@
+-- 1080p perf programs (M3 Step 1, `make perf`). Each entry takes (v : Video)
+-- (f : Font): the CLI binds IN.mp4 then FONT.ttf (M2-R1). One entry serves the
+-- s10, s20 and s60 clips: the trim and the last text window have an open tail
+-- (a hi past the last frame clamps to the clip). All offsets are even.
+def whole : Video -> Font -> Video := fun (v : Video) (f : Font) => v
+def chain : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 48 16777215 40 40) (cons (pair (interval 25 124) "video-lang") (cons (pair (interval 125 99999) "1080p") nil)) (pad (padSpec 1920 1080 320 180 1056816) (scale (res 1280 720) (crop (rect 160 90 1600 900) (trim (interval 25 99999) v))))

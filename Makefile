@@ -15,9 +15,14 @@ TARGET = src/json.c src/media.c
 SRC = src/main.c $(FRONT) $(TARGET)
 MEDIA_TOOL = test/mediatool.c $(FRONT) $(TARGET)
 MEDIA_REVIEW = test/mediareview.c $(FRONT)
+MEDIA_PERF = test/mediaperf.c
+MEDIA_PERF_CHECK = test/mediaperfcheck.c
+# The 1080p perf clips (M3-R2): made by the pin at run time, never committed.
+PERF = test/media/perf
+PERF_CLIPS = $(PERF)/s10.mp4 $(PERF)/s20.mp4 $(PERF)/s60.mp4
 HEADERS = $(wildcard src/*.h src/front/*.h)
 
-.PHONY: build check check-clang clean
+.PHONY: build check check-clang clean perf
 
 build: build/langc
 
@@ -38,17 +43,39 @@ build/mediatool: $(MEDIA_TOOL) $(HEADERS) build/domain.c
 build/mediareview: $(MEDIA_REVIEW) src/media.c $(HEADERS) build/domain.c
 	$(TCC) $(CFLAGS) -o build/mediareview $(MEDIA_REVIEW) build/domain.c $(FFMPEG_LDLIBS)
 
+build/mediaperf: $(MEDIA_PERF)
+	mkdir -p build
+	$(TCC) $(CFLAGS) -o build/mediaperf $(MEDIA_PERF)
+
+build/mediaperfcheck: $(MEDIA_PERF_CHECK) $(MEDIA_PERF)
+	mkdir -p build
+	$(TCC) $(CFLAGS) -o build/mediaperfcheck $(MEDIA_PERF_CHECK)
+
+# The gate av.mp4 flags (test/gate.sh) at 1920x1080; $* = the clip seconds.
+$(PERF)/s%.mp4:
+	mkdir -p $(PERF)
+	$(FFMPEG) -nostdin -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=25:duration=$* -f lavfi -i sine=frequency=440:duration=$* -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest -f mp4 $@.tmp
+	mv $@.tmp $@
+
 check-clang: build/domain.c
 	$(CC) $(CLANG_FLAGS) $(SRC) build/domain.c
 	$(CC) $(CLANG_FLAGS) $(MEDIA_TOOL) build/domain.c
 	$(CC) $(CLANG_FLAGS) $(MEDIA_REVIEW) build/domain.c
+	$(CC) $(CLANG_FLAGS) $(MEDIA_PERF)
+	$(CC) $(CLANG_FLAGS) $(MEDIA_PERF_CHECK)
 
-check: build/langc build/mediatool build/mediareview check-clang
+check: build/langc build/mediatool build/mediareview build/mediaperfcheck check-clang
 	FFMPEG="$(FFMPEG)" sh test/gate.sh
 	TCC="$(TCC)" FFMPEG_CFLAGS="$(FFMPEG_CFLAGS)" FFMPEG_LDLIBS="$(FFMPEG_LDLIBS)" node test/regressions.js
 	node test/printer-regressions.js
 	build/mediatool
 	FFMPEG="$(FFMPEG)" build/mediareview
+	build/mediaperfcheck
+
+# 1080p perf (M3): not part of check (D-M3-1). The cap ladder s10, s20, then
+# s60 (D-M3-4) with R1 on each run (D-M3-5).
+perf: build/langc build/mediaperf $(PERF_CLIPS)
+	FFMPEG="$(FFMPEG)" build/mediaperf
 
 clean:
-	rm -rf build
+	rm -rf build $(PERF)
