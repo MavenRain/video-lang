@@ -9,6 +9,8 @@ type or a core operation that this file does not give.
 When the design changes, paste the new version. Then record the change as an
 open item in `SPEC.md` section 9.
 
+Note (ruling M3-R4): the gate refuses dashes in every file, thus ` - ` replaces the 4 em dashes of the paste (lines 30 to 33). The paste is verbatim otherwise.
+
 ---
 
 # video-lang denotational design (USER, verbatim, 2026-10-10)

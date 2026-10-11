@@ -264,7 +264,7 @@ because the compiler refuses `axiom` (section 10 of the probe).
 | M2 | `burnText` with `Text`, `Font`, `Style` and `SubtitleTrack`, against ffmpeg-full `drawtext` |
 | M3 | Hardening: the docs, and the cost at 1080p below 4 GB (ruling M3-R1) |
 
-Status 2026-10-10: K0, M1 and M2 are DONE. M3 Step 1 (`make perf`) and
-Step 2 (the host docs) are DONE. Step 3 is this file and `formers/`. Step 4
+Status 2026-10-10: K0, M1, M2 and M3 are DONE. M3 Step 1 (`make perf`),
+Step 2 (the host docs), Step 3 (this file and `formers/`) and Step 4
 (`README.md`, `docs/host/README.md`, `docs/STATUS.md`, `docs/VALIDATION.md`)
-is open.
+are DONE.

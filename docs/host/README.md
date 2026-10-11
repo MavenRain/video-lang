@@ -1,31 +1,28 @@
-# TinyCC media host kit (scaffold)
+# tcc-media host
 
-This kit compiles a small typed language to JSON and trimmed media. A C front end (lexer,
-parser, checker and evaluator) and a JSON writer build with TinyCC into
-one executable, `build/langc`. The output is the final state of each
-instance in the program. A media build lowers a Video entry to a trim
-chain over one input, then decodes and encodes the kept frames and audio.
+The tcc-media host compiles video-lang programs to mp4 files and to JSON.
+A C front end (lexer, parser, checker and evaluator), a JSON writer and a
+media back end build with TinyCC into one executable, `build/langc`. The
+media back end links the FFmpeg libraries and FreeType. A media build
+applies a `Video` entry to input files. A JSON build writes the final state
+of each instance in the program. `Video` and `Font` are opaque: a program
+cannot make a value of these types, only take one as a parameter.
 
-This scaffold adds media primitives to the JSON host. `check` and `eval`
-understand `Video`, `Interval`, `interval`, `trim` and `intersect`;
-`Position` is defined as `Nat` in the domain. `build` writes JSON,
-including intervals as described below. `Video` remains opaque, and
-the media verbs apply Video definitions to input files.
-
-From this kit directory, or from a generated language directory:
+From the repository root:
 
 ```sh
 make check
 build/langc check examples/inventory.lang
 build/langc eval examples/inventory.lang stockTotal
-build/langc build examples/inventory.lang -o inventory.json
+build/langc build examples/inventory.lang -o build/inventory.json
+build/langc check test/media/text.lang
 ```
 
 The build uses TinyCC (`TCC`, default `tcc`). Validation uses TinyCC
 0.9.28rc on AArch64 Darwin. `make check-clang` also compiles the sources
 with `cc -Wall -Wextra -Wswitch-enum -Werror -fsyntax-only` (`CC`, default
 `cc`). The gate uses POSIX `sh`, `awk`, `cmp`, `rg` and Node (for `JSON.parse`).
-The build also needs `pkg-config` and FFmpeg libraries: `libavfilter`,
+The build also needs `pkg-config`, FreeType (`freetype2`) and the FFmpeg libraries: `libavfilter`,
 `libavformat`, `libavcodec`, `libswscale`, `libswresample` and `libavutil`.
 The tested FFmpeg version is 9.0.2 from `ffmpeg-full`, with
 `FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full`. Override `FFMPEG_PREFIX`
@@ -45,6 +42,30 @@ Exit 0 is success. Exit 1 is a refused program. Exit 2 is a usage or IO
 error. A refusal writes one line to stderr: `langc: CODE: NAME: message`.
 `langc build` makes the full document in memory before it writes. Thus a
 refused build writes nothing to stdout and makes no `OUT` file.
+
+## The media build
+
+The media verbs take an entry `MAIN` whose type ends in `Video`. Each
+parameter of `MAIN` is a `Video` or a `Font`. The input files follow the
+order of the parameters: an mp4 file for a `Video`, a TrueType file for a
+`Font`.
+
+The host evaluates the entry to a plan of steps: `trim`, `scale`, `crop`,
+`pad` and `burnText`. A `trim` also cuts the audio. Then the host decodes
+the input, applies each step and encodes the result with libx264 and aac,
+with the options of the ffmpeg CLI. The audio stream is optional. The host
+refuses an input without a constant frame rate (`VFR_SOURCE`).
+
+`langc ffmpeg` prints one ffmpeg command for the same plan: a `-vf` chain
+of `trim`, `scale`, `crop`, `pad` and `drawtext` filters, and a `-af`
+chain. The gate runs this command with the ffmpeg of `FFMPEG_PREFIX`. Then
+it compares the decoded frames of the two outputs with framemd5 over all
+the streams (ruling R1). `SPEC.md` section 7 lists the media refusal codes.
+
+The host keeps the demuxed packets of the input in memory, not the decoded
+frames (O-3). Thus memory grows with the compressed size of the input. At
+1920x1080, a 60 second input has a peak resident size below 1 GB
+(`make perf`, `docs/VALIDATION.md`).
 
 ## The JSON document
 
@@ -109,8 +130,10 @@ for each refusal.
 
 ## The domain
 
-`domain/domain.lang` is the sample domain and `domain/video.lang` holds the
-video-lang definitions. The Makefile joins them into
+`domain/domain.lang` holds the inventory definitions of `examples/` and the
+alias `Position`. `domain/video.lang` holds the video-lang definitions
+`Filter`, `idFilter`, `compose` and `SubtitleTrack`. The other video-lang
+types and operations are core names of the host. The Makefile joins them into
 `build/domain-all.lang`, and `gen/embed.c` embeds that file in the
 executable at build time. `domain/README.md` tells how to change them.
 
@@ -119,7 +142,11 @@ executable at build time. `domain/README.md` tells how to change them.
 | Limit | Value | Source |
 |---|---|---|
 | Source size | 1 MiB | `src/front/front.h:7` |
-| Arena | 1 GiB | `src/main.c:10` |
+| Arena | 1 GiB | `src/main.c:11` |
+| Media plan steps | 64 | `src/media.c:32` |
+| Text entries in all `burnText` steps | 64 | `src/media.c:33` |
+| Entry parameters | 64 | `src/media.c:34` |
+| ffmpeg filter chain text | 65536 bytes | `src/media.c:35` |
 | Parser nesting | 1000 | `src/front/parser.c:16` |
 | Checker depth | 2000 | `src/front/check.c:10` |
 | Evaluator depth | 2000 | `src/front/core.h:16` |
@@ -146,7 +173,9 @@ needs it, and a refused build writes no document.
 
 ## Origin
 
-This kit is a fork of the tcc-wasm kit front end. It does not have the
+The tcc-media kit is a fork of the JSON host kit of lang-template, and it
+adds `src/media.c`, `src/media.h` and the verb `ffmpeg`. The JSON host kit
+is a fork of the tcc-wasm kit front end. It does not have the
 Wasm writer (`wasm.c`), the IR (`ir.h`) or the target interface
 (`target.h`). It adds `src/json.c` and `src/json.h`, and `src/main.c` has
 the verbs `check`, `eval` and `build`. The front end also fixes dependent
@@ -179,6 +208,5 @@ kit):
 | `src/target.h` | `077dff69391f69dbd4623858553dee7b5547a8c1edc0c75660e0aede9b15e429` |
 | `src/wasm.c` | `4f69fba5ea1f335e95c7f030d970c4e89da84ee13c57d95879137cf96d8235bd` |
 
-`FORMERS.md`, copied to `formers/tcc-json.md` in a generated language,
-gives the status of each former. `docs/CAPABILITY.md` gives the host
-facts.
+`formers/tcc-media.md` gives the status of each former.
+`docs/host/CAPABILITY.md` and `probe/CAPABILITY.md` give the host facts.
