@@ -80,7 +80,13 @@ typedef enum {
   OP_MK_PAD_SPEC,
   OP_SCALE,
   OP_CROP,
-  OP_PAD
+  OP_PAD,
+  /* video-lang M2 */
+  OP_TEXT,
+  OP_FONT,
+  OP_STYLE,
+  OP_MK_STYLE,
+  OP_BURN_TEXT
 } Op;
 
 /* The instance of pure, map, bind and filter (formers F5 and F8). */
@@ -100,7 +106,8 @@ typedef enum {
   CORE_PI,     /* (name : a) -> b */
   CORE_SIGMA,  /* Sigma (name : a) b */
   CORE_APP,    /* a b */
-  CORE_OP      /* a core name with all of its arguments */
+  CORE_OP,     /* a core name with all of its arguments */
+  CORE_TEXT    /* a Text literal: name holds the bytes, nat the byte count */
 } CoreKind;
 
 typedef struct Core Core;
@@ -130,7 +137,8 @@ typedef enum {
   VAL_OP,   /* a canonical value or a type */
   VAL_VAR,  /* neutral: a variable at a de Bruijn level */
   VAL_APP,  /* neutral: a neutral function applied to a value */
-  VAL_STUCK /* neutral: an operation with a neutral scrutinee */
+  VAL_STUCK, /* neutral: an operation with a neutral scrutinee */
+  VAL_TEXT   /* a Text value: name holds the bytes, nat the byte count */
 } ValKind;
 
 typedef struct Value Value;

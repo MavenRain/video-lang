@@ -1,0 +1,1 @@
+def s : Font -> Style := fun f => style f 24 0 16385 0

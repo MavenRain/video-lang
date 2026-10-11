@@ -138,13 +138,19 @@ static const Builtin BUILTINS[] = {
   {"padSpec", 5, RULE_NATS, OP_MK_PAD_SPEC, OP_PAD_SPEC, 0},
   {"scale", 2, RULE_MEDIA, OP_SCALE, OP_VIDEO, 0},
   {"crop", 2, RULE_MEDIA, OP_CROP, OP_VIDEO, 0},
-  {"pad", 2, RULE_MEDIA, OP_PAD, OP_VIDEO, 0}
+  {"pad", 2, RULE_MEDIA, OP_PAD, OP_VIDEO, 0},
+  /* video-lang M2 */
+  {"Text", 0, RULE_TYPE0, OP_TEXT, OP_NAT, 0},
+  {"Font", 0, RULE_TYPE0, OP_FONT, OP_NAT, 0},
+  {"Style", 0, RULE_TYPE0, OP_STYLE, OP_NAT, 0},
+  {"style", 5, RULE_NATS, OP_MK_STYLE, OP_STYLE, 0},
+  {"burnText", 3, RULE_MEDIA, OP_BURN_TEXT, OP_VIDEO, 0}
 };
 
 #define BUILTIN_COUNT ((uint32_t)(sizeof BUILTINS / sizeof BUILTINS[0]))
 
 /* Names that no declaration can take (rule R4). */
-static const char *const RESERVED[] = {"Bool", "Text"};
+static const char *const RESERVED[] = {"Bool"};
 
 typedef enum {
   HEAD_TERM, /* a local, a definition or another term: plain application */
@@ -199,6 +205,16 @@ static const Core *core_leaf(Checker *c, CoreKind kind, uint64_t nat) {
   Core *k = new_core(c, kind);
   if (k != NULL)
     k->nat = nat;
+  return k;
+}
+
+/* A Text literal: the bytes stay in the arena with the AST. */
+static const Core *core_text(Checker *c, const char *bytes, uint64_t count) {
+  Core *k = new_core(c, CORE_TEXT);
+  if (k != NULL) {
+    k->name = bytes;
+    k->nat = count;
+  }
   return k;
 }
 
@@ -862,8 +878,14 @@ static const Core *rule_transport(Call *k) {
   return op3(c, OP_TRANSPORT, 0, 3, p, e, u);
 }
 
-/* The Nat operations and the media constructors interval, res, rect and
-   padSpec: each of the arity arguments is a Nat. */
+/* The type of argument I of a RULE_NATS op: a Nat, but the Font of style. */
+static const Value *nats_arg(Checker *c, Op op, uint32_t i) {
+  return op == OP_MK_STYLE && i == 0u ? tyop(c, OP_FONT, 0, NULL, NULL, NULL) : nat_type(c);
+}
+
+/* The Nat operations and the media constructors interval, res, rect, padSpec
+   and style: each of the arity arguments is a Nat, but the first argument of
+   style is a Font. */
 static const Core *rule_nats(Call *k) {
   Checker *c = k->c;
   const Core **args = arena_alloc(c->m->arena, ((size_t)k->b->arity + 1u) * sizeof *args);
@@ -871,11 +893,12 @@ static const Core *rule_nats(Call *k) {
   if (args == NULL)
     return nul(FAIL(c, "OOM", "out of memory"));
   for (i = 0; i < k->b->arity; i++)
-    args[i] = i == 0u || args[i - 1u] != NULL ? check(c, k->args[i], nat_type(c)) : NULL;
+    args[i] = i == 0u || args[i - 1u] != NULL ? check(c, k->args[i], nats_arg(c, k->b->op, i)) : NULL;
   k->type = tyop(c, k->b->result, 0, NULL, NULL, NULL);
   const Core *term = core_op(c, k->b->op, 0, 0, args, k->b->arity);
   /* Refuse a concrete bad field of a media constructor here (INTERVAL_RANGE,
-     FRAME_SIZE, FRAME_OFFSET, PAD_COLOR). Neutral fields are checked when
+     FRAME_SIZE, FRAME_OFFSET, PAD_COLOR, STYLE_SIZE, STYLE_COLOR, STYLE_POS).
+     Neutral fields are checked when
      the constructor is applied to its arguments by the evaluator. */
   if (k->b->result != OP_NAT && k->b->result != OP_FLAG && here(c, term) == NULL)
     return NULL;
@@ -887,10 +910,26 @@ static Op media_first(Op op) {
   return op == OP_SCALE ? OP_RESOLUTION : op == OP_CROP ? OP_RECT : op == OP_PAD ? OP_PAD_SPEC : OP_INTERVAL;
 }
 
+/* video-lang M2: burnText s track v : Video, with s : Style and
+   track : List (Prod Interval Text). */
+static const Core *rule_burn_text(Call *k) {
+  Checker *c = k->c;
+  const Value *interval = tyop(c, OP_INTERVAL, 0, NULL, NULL, NULL);
+  const Value *cue = tyop(c, OP_PROD, 2, interval, tyop(c, OP_TEXT, 0, NULL, NULL, NULL), NULL);
+  const Value *video = tyop(c, OP_VIDEO, 0, NULL, NULL, NULL);
+  const Core *s = check(c, k->args[0], tyop(c, OP_STYLE, 0, NULL, NULL, NULL));
+  const Core *track = s == NULL ? NULL : check(c, k->args[1], tyop(c, OP_LIST, 1, cue, NULL, NULL));
+  const Core *v = track == NULL ? NULL : check(c, k->args[2], video);
+  k->type = video;
+  return op3(c, OP_BURN_TEXT, 0, 3, s, track, v);
+}
+
 /* video-lang K0 and M1: trim i v, scale r v, crop q v and pad p v : Video,
-   and intersect i j : Option Interval. */
+   and intersect i j : Option Interval. M2 adds burnText. */
 static const Core *rule_media(Call *k) {
   Checker *c = k->c;
+  if (k->b->op == OP_BURN_TEXT)
+    return rule_burn_text(k);
   const Value *interval = tyop(c, OP_INTERVAL, 0, NULL, NULL, NULL);
   const Value *first = tyop(c, media_first(k->b->op), 0, NULL, NULL, NULL);
   const Value *second = k->b->op == OP_INTERSECT ? interval : tyop(c, OP_VIDEO, 0, NULL, NULL, NULL);
@@ -1322,6 +1361,9 @@ static const Core *elab_inner(Checker *c, const Term *t, const Value *hint, cons
       return nul(FAIL(c, "TYPE_UNIVERSE", "Type %llu is above the largest universe Type %u", (unsigned long long)t->nat, UNIVERSE_MAX - 1u));
     *type = val_univ(c->m, t->nat + 1u);
     return finish(c, core_leaf(c, CORE_UNIV, t->nat), hint, type);
+  case TERM_TEXT:
+    *type = tyop(c, OP_TEXT, 0, NULL, NULL, NULL);
+    return finish(c, core_text(c, t->name, t->nat), hint, type);
   }
   return NULL;
 }
@@ -1581,6 +1623,7 @@ static int print_result(Machine *m, const char *name, const Value *v, FILE *out,
   case VAL_VAR:
   case VAL_APP:
   case VAL_STUCK:
+  case VAL_TEXT:
     break;
   }
   diag_fail(m->diag, "EVAL_ENTRY", name, "the entry did not compute a number");

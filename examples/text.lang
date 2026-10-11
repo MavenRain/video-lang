@@ -1,0 +1,8 @@
+-- Text (video-lang M2): a literal is at most 256 bytes of UTF-8, and \" and \\
+-- are the only escapes. A SubtitleTrack pairs each cue Interval with its Text.
+def greeting : Text := "Hi"
+def quoted : Text := "say \"cut\" \\ go"
+def symbols : Text := "é€𝄞"
+def track : SubtitleTrack := cons (pair (interval 5 9) greeting) nil
+def caption : (s : Style) -> (v : Video) -> Video := fun (s : Style) (v : Video) => burnText s track v
+def corner : Font -> Style := fun f => style f 1024 16777215 16384 16384

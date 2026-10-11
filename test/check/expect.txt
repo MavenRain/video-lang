@@ -22,3 +22,10 @@ dependent-result.lang TYPE_MISMATCH
 cumulative.lang TYPE_MISMATCH
 type2.lang TYPE_UNIVERSE
 bad-eta.lang TYPE_REFL
+style-size.lang STYLE_SIZE
+style-size-big.lang STYLE_SIZE
+style-color.lang STYLE_COLOR
+style-pos.lang STYLE_POS
+text-mismatch.lang TYPE_MISMATCH
+burntext-track.lang TYPE_MISMATCH
+style-pos-y.lang STYLE_POS

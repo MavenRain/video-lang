@@ -130,6 +130,7 @@ static int starts_atom(TokKind kind) {
     case TOK_LPAREN:
     case TOK_KW_TYPE:
     case TOK_KW_SIGMA:
+    case TOK_TEXT:
       return 1;
     case TOK_EOF:
     case TOK_RPAREN:
@@ -277,7 +278,7 @@ static const Term *parse_leaf(Parser *p, TermKind kind) {
   Term *term = make_term(p, kind, tok->line, tok->col);
   if (term == NULL) return NULL;
   term->nat = tok->nat;
-  term->name = kind == TERM_VAR ? token_text(p, tok) : NULL;
+  term->name = kind == TERM_VAR ? token_text(p, tok) : tok->bytes;
   bump(p);
   return kind == TERM_VAR && term->name == NULL ? NULL : term;
 }
@@ -290,6 +291,7 @@ static const Term *parse_atom(Parser *p) {
     case TOK_LPAREN: return parse_paren(p);
     case TOK_KW_TYPE: return parse_universe(p);
     case TOK_KW_SIGMA: return parse_sigma(p);
+    case TOK_TEXT: return parse_leaf(p, TERM_TEXT);
     case TOK_EOF:
     case TOK_RPAREN:
     case TOK_COLON:
@@ -441,6 +443,7 @@ static int parse_decl(Parser *p, Decl *d) {
     case TOK_KW_FUN:
     case TOK_KW_TYPE:
     case TOK_KW_SIGMA:
+    case TOK_TEXT:
       break;
   }
   return fail_at(p, tok, "'def', 'axiom' or 'family'");

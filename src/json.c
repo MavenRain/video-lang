@@ -73,6 +73,7 @@ static int ready(Out *o, const Value *v) {
   switch (v->kind) {
   case VAL_NAT:
   case VAL_OP:
+  case VAL_TEXT:
     return 1;
   case VAL_TRAP:
     return diag_fail(o->m->diag, "EVAL_OVERFLOW", o->def, "the instance value traps (a Nat overflow)");
@@ -185,9 +186,31 @@ static int fields_json(Out *o, const Value *v, Op op, const char *const *keys, u
   return ok && put_text(o, "}");
 }
 
+/* A Text value is a JSON string. The lexer refuses every control byte, so
+   only '"' and '\' need an escape. */
+static int text_json(Out *o, const Value *v) {
+  char one[3];
+  uint64_t i;
+  int ok;
+  if (v->kind != VAL_TEXT)
+    return internal(o, "a Text value that is not a literal");
+  ok = put_text(o, "\"");
+  for (i = 0; ok && i < v->nat; i++) {
+    char c = v->name[i];
+    int escape = c == '"' || c == '\\';
+    one[0] = escape ? '\\' : c;
+    one[1] = escape ? c : '\0';
+    one[2] = '\0';
+    ok = put_text(o, one);
+  }
+  return ok && put_text(o, "\"");
+}
+
 static int op_json(Out *o, const Value *type, const Value *v) {
   char num[24];
   switch (type->op) {
+  case OP_TEXT:
+    return text_json(o, v);
   case OP_NAT:
     if (v->kind != VAL_NAT)
       return internal(o, "a Nat value that is not a number");
@@ -270,6 +293,10 @@ static int op_json(Out *o, const Value *type, const Value *v) {
   case OP_SCALE:
   case OP_CROP:
   case OP_PAD:
+  case OP_FONT:
+  case OP_STYLE:
+  case OP_MK_STYLE:
+  case OP_BURN_TEXT:
     return internal(o, "a type that is not a type former");
   }
   return internal(o, "an unknown operation");
@@ -302,6 +329,7 @@ static int typed_json(Out *o, const Value *type, const Value *v) {
   case VAL_VAR:
   case VAL_APP:
   case VAL_STUCK:
+  case VAL_TEXT:
     return refuse(o, "a value of a stuck type");
   }
   return internal(o, "an unknown type kind");
@@ -336,6 +364,7 @@ static int is_instance(const DefInfo *d) {
   case VAL_VAR:
   case VAL_APP:
   case VAL_STUCK:
+  case VAL_TEXT:
     return 1;
   }
   return 1;

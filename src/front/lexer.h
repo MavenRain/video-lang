@@ -22,14 +22,19 @@ typedef enum {
   TOK_KW_FAMILY,
   TOK_KW_AXIOM,
   TOK_KW_TYPE,
-  TOK_KW_SIGMA
+  TOK_KW_SIGMA,
+  TOK_TEXT      /* video-lang M2: "..." */
 } TokKind;
+
+/* The largest Text literal, in bytes after the escapes. */
+#define TEXT_BYTES 256u
 
 typedef struct {
   TokKind kind;
   const char *text;
   size_t len;
-  uint64_t nat;
+  uint64_t nat;   /* TOK_NAT: the value. TOK_TEXT: the byte count. */
+  const char *bytes; /* TOK_TEXT: the bytes after the escapes, NUL-terminated */
   int line;
   int col;
 } Token;

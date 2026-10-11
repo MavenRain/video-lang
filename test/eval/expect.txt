@@ -23,3 +23,7 @@ algebra stop => nil
 monad okBind => inl flagNo
 functions four => 4
 functions applied => 36
+text greeting => "Hi"
+text quoted => "say \"cut\" \\ go"
+text symbols => "é€𝄞"
+text track => cons (pair (interval 5 9) "Hi") nil

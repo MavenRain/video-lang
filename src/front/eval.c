@@ -27,7 +27,9 @@ static const char *const OP_NAMES[] = {
   [OP_TRIM] = "trim", [OP_INTERSECT] = "intersect",
   [OP_RESOLUTION] = "Resolution", [OP_MK_RES] = "res", [OP_RECT] = "Rect",
   [OP_MK_RECT] = "rect", [OP_PAD_SPEC] = "PadSpec", [OP_MK_PAD_SPEC] = "padSpec",
-  [OP_SCALE] = "scale", [OP_CROP] = "crop", [OP_PAD] = "pad"
+  [OP_SCALE] = "scale", [OP_CROP] = "crop", [OP_PAD] = "pad",
+  [OP_TEXT] = "Text", [OP_FONT] = "Font", [OP_STYLE] = "Style", [OP_MK_STYLE] = "style",
+  [OP_BURN_TEXT] = "burnText"
 };
 
 /* The number of arguments of each operation. VARIES: it comes from the
@@ -46,7 +48,8 @@ static const unsigned char OP_ARITY[] = {
   [OP_NAT_EQ] = 2, [OP_NAT_LE] = 2, [OP_FLAG_IF] = 3, [OP_PROJ] = 1,
   [OP_VIDEO] = 0, [OP_INTERVAL] = 0, [OP_MK_INTERVAL] = 2, [OP_TRIM] = 2, [OP_INTERSECT] = 2,
   [OP_RESOLUTION] = 0, [OP_MK_RES] = 2, [OP_RECT] = 0, [OP_MK_RECT] = 4, [OP_PAD_SPEC] = 0,
-  [OP_MK_PAD_SPEC] = 5, [OP_SCALE] = 2, [OP_CROP] = 2, [OP_PAD] = 2
+  [OP_MK_PAD_SPEC] = 5, [OP_SCALE] = 2, [OP_CROP] = 2, [OP_PAD] = 2,
+  [OP_TEXT] = 0, [OP_FONT] = 0, [OP_STYLE] = 0, [OP_MK_STYLE] = 5, [OP_BURN_TEXT] = 3
 };
 
 typedef enum {
@@ -109,6 +112,16 @@ const Value *val_nat(Machine *m, uint64_t n) {
   Value *v = new_value(m, VAL_NAT);
   if (v != NULL)
     v->nat = n;
+  return v;
+}
+
+/* A Text value shares the bytes of its literal in the arena. */
+static const Value *val_text(Machine *m, const char *bytes, uint64_t count) {
+  Value *v = new_value(m, VAL_TEXT);
+  if (v != NULL) {
+    v->name = bytes;
+    v->nat = count;
+  }
   return v;
 }
 
@@ -249,6 +262,7 @@ static Scrut scrut_of(const Value *v) {
   case VAL_APP:
   case VAL_STUCK:
     return SCRUT_NEUTRAL;
+  case VAL_TEXT:
   case VAL_NAT:
   case VAL_UNIV:
   case VAL_LAM:
@@ -360,6 +374,7 @@ const Value *apply_value(Machine *m, const Value *fn, const Value *arg) {
     v->dom = fn;
     v->arg = arg;
     return v;
+  case VAL_TEXT:
   case VAL_NAT:
   case VAL_UNIV:
   case VAL_PI:
@@ -836,12 +851,42 @@ static const Value *reduce_frame(Machine *m, Op op, const Value *const *a, uint3
   return val_op(m, VAL_OP, op, 0, 0, a, n);
 }
 
-/* video-lang K0 and M1. trim, scale, crop and pad are stuck on their Video:
-   a Video value is a neutral input, and the build walks the residual term
-   (src/media.c). The evaluator never rewrites by a law (D1). */
+#define STYLE_SIZE_MAX 1024u
+
+/* video-lang M2: style font size color x y. The size is from 1 to
+   STYLE_SIZE_MAX, the color is 24-bit RGB and an offset is at most
+   FRAME_SIZE_MAX. The Font is an opaque input. Neutral fields and lazy
+   overflow values are kept until they are used, as for reduce_frame. */
+static const Value *reduce_style(Machine *m, const Value *const *a, uint32_t n) {
+  static const char *const AXES[] = {"x", "y"};
+  uint32_t i;
+  if (a[1]->kind == VAL_NAT && (a[1]->nat == 0u || a[1]->nat > STYLE_SIZE_MAX)) {
+    diag_fail(m->diag, "STYLE_SIZE", m->def, "the size %llu of style is not from 1 to %u",
+      (unsigned long long)a[1]->nat, STYLE_SIZE_MAX);
+    return NULL;
+  }
+  if (a[2]->kind == VAL_NAT && a[2]->nat > PAD_COLOR_MAX) {
+    diag_fail(m->diag, "STYLE_COLOR", m->def, "the color %llu of style is above 0xFFFFFF",
+      (unsigned long long)a[2]->nat);
+    return NULL;
+  }
+  for (i = 0; i < 2u; i++) {
+    if (a[3u + i]->kind == VAL_NAT && a[3u + i]->nat > FRAME_SIZE_MAX) {
+      diag_fail(m->diag, "STYLE_POS", m->def, "the %s offset %llu of style is above %u",
+        AXES[i], (unsigned long long)a[3u + i]->nat, FRAME_SIZE_MAX);
+      return NULL;
+    }
+  }
+  return val_op(m, VAL_OP, OP_MK_STYLE, 0, 0, a, n);
+}
+
+/* video-lang K0, M1 and M2. trim, scale, crop, pad and burnText are stuck on
+   their Video (the last argument): a Video value is a neutral input, and the
+   build walks the residual term (src/media.c). The evaluator never rewrites
+   by a law (D1). */
 static const Value *reduce_video(Machine *m, Op op, const Value *const *a, uint32_t n) {
   const Value *out;
-  if (blocked(m, a[1], op, 0, 0, a, n, &out))
+  if (blocked(m, a[n - 1u], op, 0, 0, a, n, &out))
     return out;
   return internal(m, "a media operation on a Video that is not an input");
 }
@@ -928,6 +973,9 @@ static const Value *reduce_op(Machine *m, Op op, uint32_t inst, uint32_t field, 
   case OP_RESOLUTION:
   case OP_RECT:
   case OP_PAD_SPEC:
+  case OP_TEXT:
+  case OP_FONT:
+  case OP_STYLE:
     return val_op(m, VAL_OP, op, inst, field, a, n);
   case OP_MK_INTERVAL:
     return reduce_interval(m, a, n);
@@ -935,10 +983,13 @@ static const Value *reduce_op(Machine *m, Op op, uint32_t inst, uint32_t field, 
   case OP_MK_RECT:
   case OP_MK_PAD_SPEC:
     return reduce_frame(m, op, a, n);
+  case OP_MK_STYLE:
+    return reduce_style(m, a, n);
   case OP_TRIM:
   case OP_SCALE:
   case OP_CROP:
   case OP_PAD:
+  case OP_BURN_TEXT:
     return reduce_video(m, op, a, n);
   case OP_INTERSECT:
     return reduce_intersect(m, a, n);
@@ -1016,6 +1067,8 @@ static const Value *eval_inner(Machine *m, const Env *env, const Core *c) {
     return def_value(m, c->index);
   case CORE_NAT:
     return val_nat(m, c->nat);
+  case CORE_TEXT:
+    return val_text(m, c->name, c->nat);
   case CORE_TRAP:
     return val_trap(m);
   case CORE_UNIV:
@@ -1084,6 +1137,8 @@ static int conv_loop(Machine *m, uint32_t level, const Value *a, const Value *b)
     case VAL_UNIV:
     case VAL_VAR:
       return a->nat == b->nat;
+    case VAL_TEXT:
+      return a->nat == b->nat && memcmp(a->name, b->name, (size_t)a->nat) == 0;
     case VAL_TRAP:
       return 1;
     case VAL_LAM:
@@ -1137,6 +1192,15 @@ static const Core *core_leaf(Machine *m, CoreKind kind, uint64_t nat) {
   Core *c = new_core(m, kind);
   if (c != NULL)
     c->nat = nat;
+  return c;
+}
+
+static const Core *core_text(Machine *m, const char *bytes, uint64_t count) {
+  Core *c = new_core(m, CORE_TEXT);
+  if (c != NULL) {
+    c->name = bytes;
+    c->nat = count;
+  }
   return c;
 }
 
@@ -1209,6 +1273,8 @@ static const Core *quote_inner(Machine *m, uint32_t level, const Value *v) {
   switch (v->kind) {
   case VAL_NAT:
     return core_leaf(m, CORE_NAT, v->nat);
+  case VAL_TEXT:
+    return core_text(m, v->name, v->nat);
   case VAL_TRAP:
     return core_leaf(m, CORE_TRAP, 0);
   case VAL_UNIV:
@@ -1368,6 +1434,7 @@ static void print_binder(Printer *p, const Value *v) {
   case VAL_VAR:
   case VAL_APP:
   case VAL_STUCK:
+  case VAL_TEXT:
     break;
   }
   if (p->extra_count < PRINT_NAMES_MAX)
@@ -1375,6 +1442,22 @@ static void print_binder(Printer *p, const Value *v) {
   p->extra_count++;
   print_value(p, body, v->kind == VAL_SIGMA);
   p->extra_count--;
+}
+
+/* A Text value prints as its literal, with a backslash before '"' and '\'. */
+static void print_text(Printer *p, const Value *v) {
+  char one[3];
+  uint64_t i;
+  put(p, "\"");
+  for (i = 0; i < v->nat; i++) {
+    char c = v->name[i];
+    int escape = c == '"' || c == '\\';
+    one[0] = escape ? '\\' : c;
+    one[1] = escape ? c : '\0';
+    one[2] = '\0';
+    put(p, one);
+  }
+  put(p, "\"");
 }
 
 static void print_other(Printer *p, const Value *v, int atom) {
@@ -1387,6 +1470,9 @@ static void print_other(Printer *p, const Value *v, int atom) {
   case VAL_NAT:
     snprintf(num, sizeof num, "%llu", (unsigned long long)v->nat);
     put(p, num);
+    return;
+  case VAL_TEXT:
+    print_text(p, v);
     return;
   case VAL_TRAP:
     put(p, "trap");
@@ -1427,6 +1513,7 @@ static void print_other(Printer *p, const Value *v, int atom) {
   case VAL_VAR:
   case VAL_OP:
   case VAL_STUCK:
+  case VAL_TEXT:
     break;
   }
   if (atom)

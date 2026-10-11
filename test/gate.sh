@@ -17,14 +17,21 @@ tmp=${TMPDIR:-/tmp}/langc-gate.$$
 mkdir -p "$tmp"
 awk 'BEGIN { printf "def deep : Nat := " } { } END {
   for (i = 0; i < 1100; i++) printf "("; printf "1"; for (i = 0; i < 1100; i++) printf ")"; print "" }' </dev/null >"$tmp/deep.lang"
+# Invalid UTF-8 in a Text literal (TEXT_CHAR rows of test/parse/expect.txt): an
+# overlong form, a surrogate, a code point above U+10FFFF and a truncated form.
+printf 'def x : Text := "\300\200"\n' >"$tmp/utf8-overlong.lang"
+printf 'def x : Text := "\355\240\200"\n' >"$tmp/utf8-surrogate.lang"
+printf 'def x : Text := "\364\220\200\200"\n' >"$tmp/utf8-above.lang"
+printf 'def x : Text := "\342\202"\n' >"$tmp/utf8-truncated.lang"
 
 # refusals DIR LABEL: each line of DIR/expect.txt is `FILE CODE`. `langc check`
-# must exit 1 and print `langc: CODE: ...` on stderr.
+# must exit 1 and print `langc: CODE: ...` on stderr. A FILE that is not in DIR
+# is a generated file in $tmp.
 refusals() {
   checked=0
   while read -r file code; do
     path="$1/$file"
-    [ "$file" = "deep.lang" ] && path="$tmp/deep.lang"
+    [ -e "$path" ] || path="$tmp/$file"
     status=0
     build/langc check "$path" 2>"$tmp/err" >/dev/null || status=$?
     first=$(head -n 1 "$tmp/err")
@@ -38,6 +45,15 @@ refusals() {
 }
 refusals test/parse parse
 refusals test/check check
+
+# A Text literal of TEXT_BYTES bytes after the escapes (`\\` is 1 byte) and the
+# UTF-8 edges U+0800, U+D7FF, U+10000 and U+10FFFF must check.
+awk 'BEGIN { printf "def x : Text := \"\\\\"; for (i = 0; i < 255; i++) printf "a"; print "\"" }' </dev/null >"$tmp/text-256.lang"
+printf 'def x : Text := "\340\240\200\355\237\277\360\220\200\200\364\217\277\277"\n' >"$tmp/utf8-edges.lang"
+for prog in text-256 utf8-edges; do
+  out=$(build/langc check "$tmp/$prog.lang" 2>&1) || true
+  [ "$out" = "ok" ] || { echo "FAIL $prog.lang: $out"; fail=$((fail + 1)); }
+done
 
 # A refl refusal shows both normal forms.
 build/langc check test/check/bad-refl.lang 2>"$tmp/err" >/dev/null || true

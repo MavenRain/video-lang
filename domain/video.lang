@@ -9,3 +9,4 @@ def Filter : Type 0 := (v : Video) -> Video
 def idFilter : Filter := fun (v : Video) => v
 def compose : (f : Filter) -> (g : Filter) -> Filter :=
   fun (f : Filter) (g : Filter) => fun (v : Video) => f (g v)
+def SubtitleTrack : Type 0 := List (Prod Interval Text)

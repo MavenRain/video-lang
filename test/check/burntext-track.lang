@@ -1,0 +1,2 @@
+def track : List Nat := cons 1 nil
+def caption : (s : Style) -> (v : Video) -> Video := fun (s : Style) (v : Video) => burnText s track v

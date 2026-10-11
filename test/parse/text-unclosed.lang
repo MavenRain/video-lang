@@ -1,0 +1,2 @@
+def x : Text := "abc
+def y : Nat := 1
