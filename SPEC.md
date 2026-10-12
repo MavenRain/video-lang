@@ -76,7 +76,7 @@ at check time when the field is a literal, and at evaluation otherwise
 (`src/front/check.c:899-904`).
 
 A media entry returns `Video`. Each parameter has type `Video` or `Font`
-(`MEDIA_TYPE`, `src/media.c:243-255`). The command line binds IN... to the
+(`MEDIA_TYPE`, `src/media.c:255-267`). The command line binds IN... to the
 parameters in order (`MEDIA_ARGS`). A program contains no file path (O-1).
 
 ## 3. Type formers

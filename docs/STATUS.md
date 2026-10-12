@@ -30,9 +30,9 @@ milestone is open.
 ## Known limits
 
 - A media plan has at most 64 steps and 64 entry parameters
-  (`src/media.c:32`, `:34`).
+  (`src/media.c:34`, `:36`).
 - All the `burnText` steps together hold at most 64 text entries, because
-  the in-process text mask is one 64 bit word (`src/media.c:33`).
+  the in-process text mask is one 64 bit word (`src/media.c:35`).
 - The host refuses video without a positive frame rate or a pts for each
   frame, duplicate source pts, and kept frames that round to one output
   pts (`MEDIA_TIMESTAMPS`).

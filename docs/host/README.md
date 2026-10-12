@@ -149,10 +149,10 @@ executable at build time. `domain/README.md` tells how to change them.
 |---|---|---|
 | Source size | 1 MiB | `src/front/front.h:7` |
 | Arena | 1 GiB | `src/main.c:11` |
-| Media plan steps | 64 | `src/media.c:32` |
-| Text entries in all `burnText` steps | 64 | `src/media.c:33` |
-| Entry parameters | 64 | `src/media.c:34` |
-| ffmpeg filter chain text | 65536 bytes | `src/media.c:35` |
+| Media plan steps | 64 | `src/media.c:34` |
+| Text entries in all `burnText` steps | 64 | `src/media.c:35` |
+| Entry parameters | 64 | `src/media.c:36` |
+| ffmpeg filter chain text | 65536 bytes | `src/media.c:37` |
 | Parser nesting | 1000 | `src/front/parser.c:16` |
 | Checker depth | 2000 | `src/front/check.c:10` |
 | Evaluator depth | 2000 | `src/front/core.h:16` |

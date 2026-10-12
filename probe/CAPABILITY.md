@@ -97,13 +97,13 @@ examples 11.
 
 The host accepts no general recursion. A program repeats work only with
 `fold` (over `Nat`, `List` or a domain family) and with `unfold`, which has
-a step limit (`src/front/check.c:114`). The checker refuses `def rec` with
+a step limit (`src/front/check.c:115`). The checker refuses `def rec` with
 "def rec is refused (rule R3); use fold or unfold" (`REFUSE_REC`,
 `src/front/check.c:1523`). It refuses a use of the same or a later
 definition with `REFUSE_REC` (`src/front/check.c:1128`). Gate rows:
 `rec.lang`, `self.lang` and `later.lang` in `test/check/expect.txt`. A
 media program needs no recursion: it is at most 64 steps (`STEP_MAX`,
-`src/media.c:32`, refusal `MEDIA_LIMIT`).
+`src/media.c:34`, refusal `MEDIA_LIMIT`).
 
 ## 4. Nat
 
@@ -114,18 +114,18 @@ larger literal gives `LEX_NAT_RANGE` (`src/front/lexer.c:138`). The
 eliminator is `fold` over `Nat`. A frame position is a `Nat`. A literal
 `interval lo hi` with lo > hi gives `INTERVAL_RANGE`. The media build
 refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
-`src/media.c:278`). Gate rows: the two `trap` rows in
+`src/media.c:290`). Gate rows: the two `trap` rows in
 `test/eval/expect.txt`.
 
 ## 5. How a result leaves the host
 
 `langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
 process (libavfilter graphs and `sws_scale`) and encodes OUT with the
-default encoders of the container (`src/media.c:729`; libx264 and aac for
+default encoders of the container (`src/media.c:730`; libx264 and aac for
 .mp4). It writes a temporary file and renames it to OUT only when the build
 succeeds (`src/media.c:1137`). R1 compares the decoded frames of OUT with
 the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
-(`fm`, `test/gate.sh:162`). R1 does not compare the file bytes. Evidence:
+(`fm`, `test/gate.sh:161`). R1 does not compare the file bytes. Evidence:
 media R1 40 rows, P4, P8, P17 and P17b. An input must have yuv420p video
 (`MEDIA_FORMAT`, `src/media.c:377`). Constant and variable frame rate video
 is accepted (M4-R1). Pts keep source timing relative to the first kept
@@ -167,7 +167,7 @@ program cannot declare a family (`REFUSE_DATA`,
 `src/front/check.c:1519`). `SubtitleTrack` is a definition, not a family:
 `List (Prod Interval Text)` (`domain/video.lang:12`). `Video` and `Font`
 have no constructor. Their values come only from the inputs of a media
-entry (`MEDIA_TYPE`, `src/media.c:255`).
+entry (`MEDIA_TYPE`, `src/media.c:267`).
 
 ## 8. Sigma projection and eta
 

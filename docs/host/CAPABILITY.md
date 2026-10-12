@@ -34,7 +34,7 @@ this repository.
   `test/parse/expect.txt`).
 - `Video` and `Font` values come only from the inputs of a media entry.
   A media entry returns `Video`; each parameter has type `Video` or
-  `Font` (`MEDIA_TYPE`, `src/media.c:243`).
+  `Font` (`MEDIA_TYPE`, `src/media.c:255`).
 
 ## Limits
 
@@ -50,10 +50,10 @@ this repository.
   `OOM`. The libav* libraries take their memory outside the arena.
 - Source files are at most 1 MiB (`src/front/front.h:7`).
 - A media program has at most 64 steps, 64 entry parameters and a filter
-  chain of at most 65536 bytes (`src/media.c:32`, refusal `MEDIA_LIMIT`).
+  chain of at most 65536 bytes (`src/media.c:34-37`, refusal `MEDIA_LIMIT`).
   A media plan has at most 64 text entries in total across all
   `burnText` steps, because the build keeps the active entries in one
-  64-bit mask (`src/media.c:195`, refusal `TEXT_LIMIT`).
+  64-bit mask (`src/media.c:207`, refusal `TEXT_LIMIT`).
 - At 1080p, the peak resident memory of a build was 873 MB to 936 MB for
   250 to 1500 frames (`make perf`, `probe/CAPABILITY.md` section 6).
 
@@ -67,7 +67,7 @@ this repository.
 - `langc build PROG MAIN IN... -o OUT` writes a media file. It writes a
   temporary file first and renames it to OUT only when the build succeeds
   (`src/media.c:1137`). The encoders are the defaults of the container
-  (`src/media.c:729`). Constant and variable frame rate video is accepted.
+  (`src/media.c:730`). Constant and variable frame rate video is accepted.
   Pts keep source timing relative to the first kept frame, rounded to
   `1/fr`; the last frame keeps its own duration. Audio keeps timestamp
   gaps relative to the first kept sample. Missing video pts, duplicate
