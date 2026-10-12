@@ -8,7 +8,7 @@ ran on the machine at the same time, so each wall time is an upper bound.
 To run the probe again: `make check FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full`
 runs the gate rows, and `make perf FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full`
 runs the 1080p cost rows. `make perf` rejects a measured build peak of
-4000000000 bytes or more (`test/mediaperf.c:151`).
+4000000000 bytes or more (`test/mediaperf.c:155`).
 `probe/guard.py --rss-mb N --timeout S -- COMMAND` stops a command above
 N MB resident memory or above S seconds. The gate writes only below a new
 temporary directory. `make perf` writes its clips to `test/media/perf/`,
@@ -58,6 +58,11 @@ the pin.
 | P16 | The escaped `text=` value gives the same frames as `textfile=` with the raw bytes. |
 | P17 | VFR source (ffmpeg-full 9.0.2; vfr2 = 25 fps, then 12.5 fps from position 30; stream tb 1/12800). `-fps_mode passthrough` gives the same framemd5 as no flag on vfr2 (trim 20:40, whole, scale) and on the CFR cases whole, small, vonly, tail and pick: the plain mp4 output does not duplicate or drop a frame. The output video tb is 1/fr (fr = r_frame_rate), not the stream tb: `#tb 1/25` for vfr2 and vfr3 (stream tb 1/90000), `#tb 6/149` for vfr5. The mp4 timescale is the rate numerator doubled until it is 10000 or more (12800, 19072). Each kept frame has pts = its source pts minus the pts of the first kept frame, in ticks of 1/fr: trim 20:40 gives 0 1 2 ... 9 11 13 ... 29. The last frame keeps its own packet duration (trim 20:31 ends on the first 12.5 fps frame with duration 1; trims that end at position 40 and the whole video end with 2). Other durations are the dts steps of the output. |
 | P17b | Rounding to 1/fr is to the nearest tick, not down: on vfr5 (the 12.5 fps part 13 ms late, r 149/6) position 21 is 0.993 tick after position 20 and gets pts 1. fftools adds 1/2^17 to a value that is not an integer, so a tie goes up. Two frames that round to one pts (vfrc: positions 29 and 30 are 4 ms apart at fr 25): the CLI exits 0, libx264 prints "non-strictly-monotonic PTS" and the muxer moves a dts ("This may result in incorrect timestamps"). We refuse that cut with `MEDIA_TIMESTAMPS`. |
+| P-M5-1 | Key layout (ffprobe): libx264 `-g 12 -bf 3` fixtures have a key packet at the video index 0, 12, 24, ...; the longest run of packets with a pts below the running maximum is 3; each GOP is closed. A 1290 s 1080p H.264 recording has 337 key packets, GOP about 220, each closed. |
+| P-M5-2 | Exactness: a decode from each key packet gives the frames of the decode from packet 0 at the same positions, with the first frame at the pts of the key. 54 of 54 key decodes on 20 fixtures, 8 of 8 on the recording. |
+| P-M5-3 | In a decode from packet 0, the pts of each frame equals the indexed pts of its position, on the 20 fixtures and on the recording (38700 of 38700). |
+| P-M5-4 | An audio only decode of the recording takes 0.6 s; the video decode from packet 0 takes 33 s. Thus the audio decode stays whole (D-M5-3). |
+| P-M5-5 | Baseline at commit 98d3f06: a cut of 394 frames deep in the recording built in 46.58 s (first run) and 29.99 s (warm), peak 1023 MB and 1917 MB. With the decode window: 4.93 s and 4.16 s, byte equal outputs. |
 | B1 | `expansion=normal` with `%{n}`: the frame number is relative, so trim and text do not commute. |
 | B2 | `expansion=normal` with `100%`: ffmpeg stops with "Stray %", exit 234. |
 | B3 | `fontfile=` names a missing file: ffmpeg exits 0 and uses fontconfig. |
@@ -74,7 +79,7 @@ the pin.
 | --- | --- | --- |
 | Check | `build/langc check PROG` | Exit 0, or exit 1 and a refusal code (gate rows: parse 17, check 31) |
 | Print normal form | `build/langc eval PROG NAME [ARGS...]` | The value, or `trap` (gate row: evals 29) |
-| Build | `build/langc build PROG MAIN IN... -o OUT` | A media file that the host makes in process with libav* (gate row: media R1 40) |
+| Build | `build/langc build PROG MAIN IN... -o OUT` | A media file that the host makes in process with libav* (gate row: media R1 50) |
 | Run | `build/langc ffmpeg PROG MAIN IN... -o OUT` | The ffmpeg command for the same program. The gate runs it as the reference for R1. |
 
 - `build/langc build PROG [-o OUT]` writes the JSON document (gate row:
@@ -114,27 +119,27 @@ larger literal gives `LEX_NAT_RANGE` (`src/front/lexer.c:138`). The
 eliminator is `fold` over `Nat`. A frame position is a `Nat`. A literal
 `interval lo hi` with lo > hi gives `INTERVAL_RANGE`. The media build
 refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
-`src/media.c:292`). Gate rows: the two `trap` rows in
+`src/media.c:302`). Gate rows: the two `trap` rows in
 `test/eval/expect.txt`.
 
 ## 5. How a result leaves the host
 
 `langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
 process (libavfilter graphs and `sws_scale`) and encodes OUT with the
-default encoders of the container (`src/media.c:732`; libx264 and aac for
+default encoders of the container (`src/media.c:794`; libx264 and aac for
 .mp4). It writes a temporary file and renames it to OUT only when the build
-succeeds (`src/media.c:1149`). R1 compares the decoded frames of OUT with
+succeeds (`src/media.c:1231`). R1 compares the decoded frames of OUT with
 the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
-(`fm`, `test/gate.sh:161`). R1 does not compare the file bytes. Evidence:
-media R1 40 rows, P4, P8, P17 and P17b. An input must have yuv420p video
-(`MEDIA_FORMAT`, `src/media.c:379`). Constant and variable frame rate video
+(`fm`, `test/gate.sh:164`). R1 does not compare the file bytes. Evidence:
+media R1 50 rows, P4, P8, P17 and P17b. An input must have yuv420p video
+(`MEDIA_FORMAT`, `src/media.c:389`). Constant and variable frame rate video
 is accepted (M4-R1). Pts keep source timing relative to the first kept
 frame, rounded to `1/fr`; the last frame keeps its own duration (M4-R2).
 Missing video pts, duplicate source pts, no positive rate, and kept pts
 that collide after rounding are `MEDIA_TIMESTAMPS` refusals
-(`src/media.c:341`, `:625`). The reference uses `-fps_mode passthrough`.
+(`src/media.c:351`, `:687`). The reference uses `-fps_mode passthrough`.
 Audio is optional; when present, it must be fltp with a positive sample
-rate (`src/media.c:384`). Its pts keep gaps relative to the first kept
+rate (`src/media.c:394`). Its pts keep gaps relative to the first kept
 sample, as the C media IO cases verify on mp4 and Matroska sources.
 
 ## 6. Cost
@@ -157,6 +162,12 @@ input grew by 36231023 bytes. One decoded 1080p yuv420p frame is 3110400
 bytes, so a build that holds the frames grows by about 3 MB for each frame.
 Not probed: the cost of `check` on a large program.
 
+With the decode window (M5), a cut of 100 frames at the end of s60 (`deep`)
+builds in 1.53 s at a peak of 906 MB; the ffmpeg command takes 3.45 s
+(commit f28d402, `make perf`). On a 1290 s 1080p recording a cut of 394
+frames builds in 4.2 to 4.9 s; at commit 98d3f06 it took 30 to 47 s
+(P-M5-5).
+
 ## 7. Parametric families
 
 The grammar lets a family take parameters (`src/front/parser.c:4`). The
@@ -167,7 +178,7 @@ program cannot declare a family (`REFUSE_DATA`,
 `src/front/check.c:1519`). `SubtitleTrack` is a definition, not a family:
 `List (Prod Interval Text)` (`domain/video.lang:12`). `Video` and `Font`
 have no constructor. Their values come only from the inputs of a media
-entry (`MEDIA_TYPE`, `src/media.c:269`).
+entry (`MEDIA_TYPE`, `src/media.c:279`).
 
 ## 8. Sigma projection and eta
 
@@ -219,3 +230,12 @@ in `test/check/expect.txt`.
 10. Peak memory must stay below 4000000000 bytes at 1080p. The cap ladder
     in `make perf` finds a build that holds frames before the s60 run
     (section 6).
+11. The video decode of a cut starts at the last decode key at or before
+    the first kept position that splits presentation order, or at packet 0
+    if none exists (`SPEC.md` O-3). It sends no more video packets after the
+    last kept frame (P-M5-2, P-M5-3). Frames from the selected start through
+    the last kept position are checked against the index; buffered frames
+    emitted afterward are discarded without a pts check. The audio decode
+    stays whole (P-M5-4). A test of the stop needs a decoder without delay:
+    with `threads=auto`, frame threading hides a stop one position early on
+    the libx264 fixtures (`docs/VALIDATION.md`).

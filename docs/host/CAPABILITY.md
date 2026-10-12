@@ -34,7 +34,7 @@ this repository.
   `test/parse/expect.txt`).
 - `Video` and `Font` values come only from the inputs of a media entry.
   A media entry returns `Video`; each parameter has type `Video` or
-  `Font` (`MEDIA_TYPE`, `src/media.c:257`).
+  `Font` (`MEDIA_TYPE`, `src/media.c:267`).
 
 ## Limits
 
@@ -53,7 +53,7 @@ this repository.
   chain of at most 65536 bytes (`src/media.c:34-37`, refusal `MEDIA_LIMIT`).
   A media plan has at most 64 text entries in total across all
   `burnText` steps, because the build keeps the active entries in one
-  64-bit mask (`src/media.c:209`, refusal `TEXT_LIMIT`).
+  64-bit mask (`src/media.c:219`, refusal `TEXT_LIMIT`).
 - At 1080p, the peak resident memory of a build was 873 MB to 936 MB for
   250 to 1500 frames (`make perf`, `probe/CAPABILITY.md` section 6).
 
@@ -66,17 +66,26 @@ this repository.
   (`src/json.h:15`).
 - `langc build PROG MAIN IN... -o OUT` writes a media file. It writes a
   temporary file first and renames it to OUT only when the build succeeds
-  (`src/media.c:1149`). The encoders are the defaults of the container
-  (`src/media.c:732`). Constant and variable frame rate video is accepted.
+  (`src/media.c:1231`). The encoders are the defaults of the container
+  (`src/media.c:794`). Constant and variable frame rate video is accepted.
   Pts keep source timing relative to the first kept frame, rounded to
   `1/fr`; the last frame keeps its own duration. Audio keeps timestamp
   gaps relative to the first kept sample. Like the ffmpeg CLI, the host
   subtracts the container start time from audio pts before the sample
-  rounding; a gap starts a new sample clock (`src/media.c:1040`).
+  rounding; a gap starts a new sample clock (`src/media.c:1114`).
   Missing video pts, duplicate pts, no positive rate, and kept pts that
   collide after rounding are `MEDIA_TIMESTAMPS` refusals
-  (`src/media.c:341`, `:625`).
+  (`src/media.c:351`, `:687`).
+- The video decode of a cut starts at the last decode key at or before the
+  first kept position that splits presentation order, or at packet 0 if
+  none exists (for H.264, the key must be an IDR picture; `SPEC.md` O-3,
+  `src/media.c:442`, `:477`). It sends no video packet after the decoder
+  gives the last kept position (`src/media.c:1177`). The audio decode is
+  whole. A frame from the selected start through the last kept position
+  with a pts that differs from the index is a `MEDIA_DECODE` refusal
+  (`src/media.c:1238`). Buffered frames emitted afterward are discarded
+  without a pts check (`src/media.c:1059`).
 - `langc ffmpeg PROG MAIN IN... -o OUT` prints the ffmpeg command for the
   same program with `-fps_mode passthrough`, and that command writes OUT
-  (`src/media.c:682`). The decoded frames of the two outputs are equal in
-  all 40 media R1 gate cases, over all streams.
+  (`src/media.c:744`). The decoded frames of the two outputs are equal in
+  all 50 media R1 gate cases, over all streams.

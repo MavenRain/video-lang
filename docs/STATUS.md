@@ -1,7 +1,10 @@
 # video-lang status
 
-The build implements the milestones K0, M1, M2, M3 and M4 of `SPEC.md`
-section 10. M4 accepts variable frame rate sources and keeps their timing.
+The build implements the milestones K0, M1, M2, M3, M4 and M5 of
+`SPEC.md` section 10. M5 decodes the video of a cut from a safe key packet
+at or before the first kept position, or from packet 0, and stops sending
+video packets after the last kept frame (M5-R1).
+M4 accepts variable frame rate sources and keeps their timing.
 M3 is the documentation and the 1080p performance checks. The
 milestone wide mutant sweep is not in the M3 scope (ruling M3-R1). No other
 milestone is open.
@@ -18,13 +21,13 @@ milestone is open.
 - The verbs `check`, `eval`, `build` (JSON and media) and `ffmpeg`.
 - Constant and variable frame rate video, with source timing relative to
   the first kept frame and `-fps_mode passthrough` (M4-R1, M4-R2).
-- R1 on 40 media programs in `make check`, and on 6 runs at 1920x1080 in
+- R1 on 50 media programs in `make check`, and on 7 runs at 1920x1080 in
   `make perf`.
 - The status of each type former (F1 to F15) is in `formers/tcc-media.md`.
 
 ## Remaining work
 
-1. None in the scope of K0 to M4. A new milestone needs a USER ruling
+1. None in the scope of K0 to M5. A new milestone needs a USER ruling
    first.
 
 ## Known limits
@@ -36,6 +39,13 @@ milestone is open.
 - The host refuses video without a positive frame rate or a pts for each
   frame, duplicate source pts, and kept frames that round to one output
   pts (`MEDIA_TIMESTAMPS`).
+- The video decode of a cut starts at the last decode key at or before the
+  first kept position that splits presentation order (for H.264, an IDR
+  picture); without one, it starts at packet 0 (`SPEC.md` O-3,
+  `src/media.c:477`). A frame from that start through the last kept position
+  with a pts that differs from the indexed pts is a refusal (`MEDIA_DECODE`,
+  `src/media.c:1238`). Buffered frames emitted afterward are discarded
+  without a pts check (`src/media.c:1059`).
 - The design law "scale is a functor" is false on pixels. Thus the compiler
   does not rewrite a program by this law.
 - R1 compares decoded frames. It does not compare container bytes.
@@ -58,7 +68,8 @@ verbs.
 `test/gate.sh` checks the examples, the parse and check refusals, the
 evaluations, the JSON goldens, the media R1 cases, the laws and the media
 refusals. `test/mediatool.c` checks the media plan and its limits.
-`test/mediareview.c` checks the media IO and the timestamps.
+`test/mediareview.c` checks the media IO, the timestamps and the decode
+windows.
 `test/mediaperfcheck.c` checks the frame comparison of `make perf`.
 `test/mediaperf.c` is the `make perf` runner.
 

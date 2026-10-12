@@ -1,15 +1,15 @@
 # Validation
 
-Date: 2026-10-11. TinyCC 0.9.28rc (AArch64 Darwin), Apple clang 21.0.0,
+Date: 2026-10-12. TinyCC 0.9.28rc (AArch64 Darwin), Apple clang 21.0.0,
 Homebrew `ffmpeg-full` 9.0.2 (libavformat 63.1.102), Node 23.10.0. Host
 executable: `build/langc`. The source files are the same as at commit
-7246d40.
+b86fefe.
 
 ## The gate
 
 `make check FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full` passes with zero
 failures. It builds `build/langc` and the C test programs with TinyCC, and
-`make check-clang` gives no warnings. It runs 339 cases:
+`make check-clang` gives no warnings. It runs 385 cases:
 
 | Group | Cases | Source |
 |---|---|---|
@@ -19,13 +19,13 @@ failures. It builds `build/langc` and the C test programs with TinyCC, and
 | evaluations | 29 | `test/gate.sh` |
 | JSON goldens | 11 | `test/gate.sh`, `test/json` |
 | build refusals | 2 | `test/gate.sh`, `test/emit` |
-| media R1 | 40 | `test/gate.sh`, `test/media`, `test/ffmpeg` |
+| media R1 | 50 | `test/gate.sh`, `test/media`, `test/ffmpeg` |
 | media laws | 24 | `test/gate.sh`, `test/media/laws.txt` |
 | media refusals | 21 | `test/gate.sh`, `test/media/refuse.txt` |
 | regressions | 6 | `test/regressions.js` |
 | printer | 2 | `test/printer-regressions.js` |
 | media regressions | 52 | `test/mediatool.c` |
-| media IO | 86 | `test/mediareview.c` |
+| media IO | 122 | `test/mediareview.c` |
 | perf comparator | 7 | `test/mediaperfcheck.c` |
 
 A media R1 case runs `langc build` and the `langc ffmpeg` command on the
@@ -33,9 +33,15 @@ same program and inputs. Then it compares the framemd5 of all the streams
 and the frame count. The gate makes its inputs at run time with ffmpeg
 (`testsrc2` 320x240 at 25 fps, with and without a 440 Hz `sine` track, and
 variable frame rate inputs with dropped frames, a rate change with audio,
-off-grid pts, and a collision after rounding). The C media IO cases also
-compare VFR outputs with continuous and gapped audio in mp4 and Matroska
-sources, including whole, trim, nested trim and scale.
+off-grid pts, and a collision after rounding). It also makes short GOP
+inputs (libx264 `-g 12 -bf 3`, 25 fps, 4 s; mp4, Matroska, VFR and open
+GOP) for cuts before, at and after a key frame, a cut to the last frame, a
+cut of one frame, nested cuts and text across a key frame. The C media IO
+cases also compare VFR outputs with continuous and gapped audio in mp4 and
+Matroska sources, including whole, trim, nested trim and scale. They check
+the decode window on known key layouts, the timestamp refusal, the skip of
+the packets before and after the window (a corrupt packet there does not
+change the output), and a rawvideo decode without decoder delay.
 
 ## Performance at 1920x1080
 
@@ -44,8 +50,10 @@ rules make the inputs with ffmpeg: `testsrc2` 1920x1080 at 25 fps and a
 440 Hz `sine` track, 10, 20 and 60 seconds (s10 7181977, s20 14470717, s60
 43413000 bytes). OURS is `langc build`. REF is the `langc ffmpeg` command.
 RSS is the peak resident size in bytes (`ru_maxrss`), and the times are in
-seconds. The table is from commit fedc686: commit 7246d40 changes the
-audio pts only, not the encode loop.
+seconds. The six `whole` and `chain` rows are from commit fedc686. The
+`deep` row (a cut of 100 frames at the end of s60, positions 1400 to 1499)
+is from commit f28d402, in a run under machine load; with the decode
+window (M5) the build decodes one GOP, not the 1500 frames of s60.
 
 | Input | Entry | Frames | OURS RSS | REF RSS | OURS s | REF s | R1 |
 |---|---|---|---|---|---|---|---|
@@ -55,6 +63,7 @@ audio pts only, not the encode loop.
 | s20 | chain | 475 | 881098752 | 897417216 | 4.21 | 4.41 | equal |
 | s60 | whole | 1500 | 904462336 | 882671616 | 18.26 | 17.91 | equal |
 | s60 | chain | 1475 | 906215424 | 895631360 | 15.90 | 15.64 | equal |
+| s60 | deep | 100 | 905510912 | 871038976 | 1.53 | 3.45 | equal |
 
 The cap is 4000000000 bytes. A run fails at the cap or above it. Memory
 grows with the compressed input size, not with the decoded frames (O-3):
@@ -62,3 +71,33 @@ from s10 to s60 the peak grew 50233344 bytes (whole) and 34766848 bytes
 (chain), and the input grew 36231023 bytes. At commit 5cfc171,
 `/usr/bin/time -l` on the s10 `chain` run gave a maximum resident set size
 of 887357440 bytes, and the runner gave 891994112 bytes for the same run.
+
+## Decode window (M5)
+
+The video decode of a cut starts at the last decode key at or before the
+first kept position that splits presentation order, or at packet 0 if none
+exists (`SPEC.md` O-3). It sends no more video packets after the decoder
+gives the last kept frame. Frames from the selected start through that
+position are checked against the index; buffered frames emitted afterward
+are discarded without a pts check (`src/media.c:1039-1065`). At commit
+f28d402, four mutants of `src/media.c` fail the media IO regressions
+(`make -B` for each rebuild): the key after the first kept position
+(17 failures), the position seed plus one, a key test with `<` in place of
+`<=`, and each key packet as a decode key (8 failures).
+
+The fifth mutant, a stop at the position before the last kept frame,
+survived the 120 media IO cases and the 50 R1 rows at f28d402 on the
+libx264 fixtures: the decoder runs with `threads=auto`, and frame threading
+holds the packet of the last kept position before it gives the frame
+before it, so the output was the same. A rawvideo source has no decoder
+delay. Commit b86fefe adds the case "a decoder without delay gives position
+hi (rawvideo {13, 30})", which fails under the mutant (`MEDIA_DECODE`) and
+passes with the original encode loop.
+
+Real world, ffmpeg-full 9.0.2, a 1920x1080 H.264 source of 1290 s (38700
+frames, 337 key packets, GOP about 220): a cut of 394 frames (positions 309
+to 702) built in 4.93 s (first run, peak 1039 MB) and 4.16 s (warm, peak
+2160 MB), equal to the reference command by framemd5 (1025 lines). At
+commit 98d3f06 the same build took 46.58 s and 29.99 s. A cut of 360
+frames in a second source built in 2.14 s (peak 880 MB), equal to the
+reference.

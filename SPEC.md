@@ -76,7 +76,7 @@ at check time when the field is a literal, and at evaluation otherwise
 (`src/front/check.c:899-904`).
 
 A media entry returns `Video`. Each parameter has type `Video` or `Font`
-(`MEDIA_TYPE`, `src/media.c:257-269`). The command line binds IN... to the
+(`MEDIA_TYPE`, `src/media.c:267-279`). The command line binds IN... to the
 parameters in order (`MEDIA_ARGS`). A program contains no file path (O-1).
 
 ## 3. Type formers
@@ -150,12 +150,12 @@ only), the composition of two resolutions (D1), an encode specification
 over one input. It runs the steps in process with the FFmpeg libraries and
 encodes with the default encoders of the container, libx264 and aac for
 `.mp4` (O-5). It writes a temporary file and renames it to OUT only when
-the encode succeeds (`src/media.c:1120`, `:1149`). Positions start again
+the encode succeeds (`src/media.c:1197`, `:1231`). Positions start again
 from 0 at encode (O-2). The video keeps the source timing relative to its
 first kept frame, rounded to the encoder time base (M4-R2). An output with
 no frame is a refusal, and no file is written (D3). `langc ffmpeg` prints
 `ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT` for the same
-program (`src/media.c:682`). The proofs and the types erase:
+program (`src/media.c:744`). The proofs and the types erase:
 only the steps reach the output.
 
 The build refuses with these codes (`src/media.c`):
@@ -236,6 +236,11 @@ because the compiler refuses `axiom` (section 10 of the probe).
 - M4-R2. RULED 2026-10-11 (USER): keep the source timing relative to the
   first kept frame. The reference uses `-fps_mode passthrough`, with one
   output frame for each kept position. R1 still compares pts and duration.
+- M5-R1. RULED 2026-10-12 (USER): seek before decode. The video decode of
+  a cut starts at a safe decode key at or before the first kept position,
+  or at packet 0 if none exists (O-3). It sends no more video packets after
+  the decoder gives the last kept frame. The R1 reference stays the same.
+  The audio decode stays whole (D-M5-3).
 - D1. Probe-forced (P3): the compiler never rewrites a program by a law
   that is false on pixels. Exact laws: trim twice, trim by an intersection,
   and each operation with trim. Laws on the frame shape only: scale
@@ -262,7 +267,15 @@ because the compiler refuses `axiom` (section 10 of the probe).
 - O-3. Default: in memory, a `Video` is the demuxed (compressed) packets
   and the position index. The decoded frames go through the operations one
   at a time at encode. Reason: one decoded 1080p frame is 3.1 MB, so a full
-  video does not fit the cap of 4 GB for one run.
+  video does not fit the cap of 4 GB for one run. At encode, the video
+  decode starts at the last decode key (for H.264, an IDR picture) at or
+  before the first kept position that splits the presentation order: every
+  earlier video packet has a lower pts and every later one a higher pts.
+  Without such a key it starts at packet 0. It sends no video packet after
+  the decoder gives the last kept position. Frames from the selected start
+  through the last kept position are checked against the position index;
+  buffered frames emitted afterward are discarded without a pts check
+  (M5-R1, `src/media.c:477`, `:1039-1065`, `:1173`).
 - O-4. Probe-forced (P7): the audio of frame p is the audio from the time of
   p to the time of p + 1. The last frame keeps the audio to the end of the
   stream. The reference is `atrim` with the same audio positions.
@@ -283,8 +296,9 @@ because the compiler refuses `axiom` (section 10 of the probe).
 | M2 | `burnText` with `Text`, `Font`, `Style` and `SubtitleTrack`, against ffmpeg-full `drawtext` |
 | M3 | Hardening: the docs, and the cost at 1080p below 4 GB (ruling M3-R1) |
 | M4 | Variable frame rate sources; source timing with `-fps_mode passthrough`; VFR R1 cases, exact laws and timestamp refusals (M4-R1, M4-R2) |
+| M5 | Decode window: the video decode of a cut starts at a safe key packet at or before the first kept position, or at packet 0; it stops sending video packets after the last kept frame; frames from the selected start through the last kept position are checked against the position index (M5-R1) |
 
-Status 2026-10-11: K0, M1, M2, M3 and M4 are DONE. M3 Steps 1 to 4 are DONE.
+Status 2026-10-12: K0, M1, M2, M3, M4 and M5 are DONE. M3 Steps 1 to 4 are DONE.
 Step 1 is `make perf`. Step 2 is the host docs. Step 3 is this file and
 `formers/`. Step 4 is `README.md`, `docs/host/README.md`, `docs/STATUS.md`
 and `docs/VALIDATION.md`. No milestone is open. A new milestone needs a new

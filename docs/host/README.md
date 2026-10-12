@@ -75,6 +75,15 @@ frames (O-3). Thus memory grows with the compressed size of the input. At
 1920x1080, a 60 second input has a peak resident size below 1 GB
 (`make perf`, `docs/VALIDATION.md`).
 
+The video decode of a cut starts at the last decode key at or before the
+first kept position that splits presentation order (for H.264, an IDR
+picture), or at packet 0 if none exists (`SPEC.md` O-3). It sends no more
+video packets after the decoder gives the last kept frame (M5-R1). The
+audio decode is whole. The host checks the pts of frames from the selected
+start through the last kept position against the index and refuses a
+difference (`MEDIA_DECODE`). Buffered frames emitted afterward are
+discarded without a pts check.
+
 ## The JSON document
 
 ```json
