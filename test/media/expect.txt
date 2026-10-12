@@ -38,3 +38,13 @@ vnoaudio 49 cut.lang whole vfr.mp4
 vmain 20 cut.lang main vfr.mp4
 vround 21 cut.lang across vfr5.mp4
 vroundw 52 cut.lang whole vfr5.mp4
+kbefore 21 gop.lang kbefore g12.mp4
+kat 24 gop.lang kat g12.mp4
+kafter 16 gop.lang kafter g12.mp4
+klast 50 gop.lang klast g12.mp4
+kone 1 gop.lang kone g12.mp4
+knest 41 gop.lang knest g12.mp4
+kburn 21 gop.lang kburn g12.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+kmkv 16 gop.lang kafter g12.mkv
+kvfr 38 gop.lang kvfr g12vfr2.mp4
+kopen 21 gop.lang kopen g12open.mp4

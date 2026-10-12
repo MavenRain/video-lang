@@ -1,0 +1,1 @@
+ffmpeg -i g12.mp4 -vf trim=start_frame=20:end_frame=81,setpts=PTS-STARTPTS,trim=start_frame=10:end_frame=51,setpts=PTS-STARTPTS -af atrim=start_sample=35280:end_sample=142884,asetpts=PTS-STARTPTS,atrim=start_sample=17640:end_sample=89964,asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

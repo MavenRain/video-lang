@@ -1,0 +1,1 @@
+ffmpeg -i g12.mp4 -vf 'trim=start_frame=40:end_frame=61,setpts=PTS-STARTPTS,drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=Hi:expansion=none:fontsize=32:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,4,12)'\''' -af atrim=start_sample=70560:end_sample=107604,asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

@@ -153,7 +153,10 @@ build/langc build examples/formers.lang -x 2>/dev/null >/dev/null || status=$?
 # frame, no audio), vfr2.mp4 (25 fps, then 12.5 fps from position 30, with
 # audio), vfr5.mp4 (vfr2 with the 12.5 fps part 13 ms late, so the pts are off
 # the 1/fr grid) and vfrc.mp4 (positions 29 and 30 are 4 ms apart, so they
-# round to one output pts: MEDIA_TIMESTAMPS).
+# round to one output pts: MEDIA_TIMESTAMPS). The M5 seek fixtures (4 s, with
+# audio, libx264 -g 12 -bf 3): g12.mp4, g12.mkv (the Matroska 1 ms clock),
+# g12vfr2.mp4 (the vfr2 frame drop, 65 frames) and g12open.mp4 (open GOPs: only
+# position 0 is an IDR picture, thus each trim decodes from packet 0).
 kit=$(pwd)
 media="$tmp/media"
 mkdir -p "$media"
@@ -161,6 +164,8 @@ ff() { "$FFMPEG" -nostdin -loglevel error -y "$@"; }
 fm() { "$FFMPEG" -nostdin -loglevel error -i "$1" -map 0 -f framemd5 -; }
 src=testsrc2=size=320x240:rate=25:duration=2
 vsrc=testsrc2=size=320x240:rate=25:duration=3
+gsrc=testsrc2=size=320x240:rate=25:duration=4
+gsine=sine=frequency=440:duration=4
 (cd "$media" &&
   ff -f lavfi -i "$src" -f lavfi -i sine=frequency=440:duration=2 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest av.mp4 &&
   ff -f lavfi -i "$src" -c:v libx264 -pix_fmt yuv420p v.mp4 &&
@@ -171,7 +176,13 @@ vsrc=testsrc2=size=320x240:rate=25:duration=3
     -vf "select='lt(n,30)+mod(n,2)',settb=1/90000,setpts='PTS+if(gte(N,30),0.013/TB,0)'" -fps_mode passthrough \
     -enc_time_base:v 1/90000 -video_track_timescale 90000 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest vfr5.mp4 &&
   ff -f lavfi -i "$src" -vf "settb=1/90000,setpts='if(eq(N,30),PTS-0.036/TB,PTS)'" -fps_mode passthrough \
-    -enc_time_base:v 1/90000 -video_track_timescale 90000 -c:v libx264 -pix_fmt yuv420p vfrc.mp4) \
+    -enc_time_base:v 1/90000 -video_track_timescale 90000 -c:v libx264 -pix_fmt yuv420p vfrc.mp4 &&
+  ff -f lavfi -i "$gsrc" -f lavfi -i "$gsine" -c:v libx264 -g 12 -bf 3 -pix_fmt yuv420p -c:a aac -shortest g12.mp4 &&
+  ff -f lavfi -i "$gsrc" -f lavfi -i "$gsine" -c:v libx264 -g 12 -bf 3 -pix_fmt yuv420p -c:a aac -shortest g12.mkv &&
+  ff -f lavfi -i "$gsrc" -f lavfi -i "$gsine" -vf "select='lt(n,30)+mod(n,2)'" -fps_mode passthrough \
+    -c:v libx264 -g 12 -bf 3 -pix_fmt yuv420p -c:a aac -shortest g12vfr2.mp4 &&
+  ff -f lavfi -i "$gsrc" -f lavfi -i "$gsine" -c:v libx264 -g 12 -bf 3 -x264-params open-gop=1 \
+    -pix_fmt yuv420p -c:a aac -shortest g12open.mp4) \
   || { echo "FAIL media: the pin did not make the fixtures"; fail=$((fail + 1)); }
 # The text rows bind the gate font (M2-R2); it is never committed.
 font=/System/Library/Fonts/Supplemental/Arial.ttf

@@ -38,9 +38,12 @@ static const char *const FONT = "/System/Library/Fonts/Supplemental/Arial.ttf";
 static const char *const PROGRAM = "test/media/perf.lang";
 
 /* An entry of perf.lang and the first source frame it keeps. */
-typedef struct { const char *name; long first; } Entry;
-#define ENTRIES 2
-static const Entry ENTRY[ENTRIES] = {{"whole", 0}, {"chain", 25}};
+/* An entry of perf.lang, the first and the last source frame it keeps (-1:
+   the last frame of the clip) and the shortest clip it runs on, in seconds.
+   Only the entries from s10 go into the O-3 checks and the s60 projection. */
+typedef struct { const char *name; long first; long last; int from; } Entry;
+#define ENTRIES 3
+static const Entry ENTRY[ENTRIES] = {{"whole", 0, -1, 10}, {"chain", 25, -1, 10}, {"deep", 1400, 1499, 60}};
 /* A rung of the ladder: test/media/perf/sSECONDS.mp4 and the OURS peaks. */
 typedef struct { int seconds; long long bytes; long long rss[ENTRIES]; } Clip;
 typedef struct { int status; long long rss; double wall; } Run;
@@ -124,7 +127,8 @@ static int failed(const Clip *clip, int e, const char *what, int status) {
 static int measure(const Paths *p, const char *ffmpeg, Clip *clip, int e) {
   char input[64];
   snprintf(input, sizeof input, "test/media/perf/s%d.mp4", clip->seconds);
-  long frames = clip->seconds * RATE - ENTRY[e].first;
+  long last = ENTRY[e].last < 0 ? clip->seconds * RATE - 1 : ENTRY[e].last;
+  long frames = last - ENTRY[e].first + 1;
   char *name = (char *)ENTRY[e].name;
   char *build[] = {"build/langc", "build", (char *)PROGRAM, name, input, (char *)FONT, "-o", (char *)p->ours, NULL};
   char *print[] = {"build/langc", "ffmpeg", (char *)PROGRAM, name, input, (char *)FONT, "-o", (char *)p->ref, NULL};
@@ -159,7 +163,7 @@ static int measure(const Paths *p, const char *ffmpeg, Clip *clip, int e) {
 
 static int rung(const Paths *p, const char *ffmpeg, Clip *clip) {
   int ok = 1;
-  for (int e = 0; ok && e < ENTRIES; e++) ok = measure(p, ffmpeg, clip, e);
+  for (int e = 0; ok && e < ENTRIES; e++) ok = clip->seconds < ENTRY[e].from || measure(p, ffmpeg, clip, e);
   return ok;
 }
 
@@ -214,7 +218,7 @@ int main(void) {
   snprintf(p.ref_md5, sizeof p.ref_md5, "%s/ref.md5", p.dir);
   snprintf(p.argv, sizeof p.argv, "%s/argv.txt", p.dir);
 
-  Clip clip[3] = {{10, 0, {0, 0}}, {20, 0, {0, 0}}, {60, 0, {0, 0}}};
+  Clip clip[3] = {{10, 0, {0}}, {20, 0, {0}}, {60, 0, {0}}};
   int ok = 1;
   for (int c = 0; ok && c < 3; c++) {
     char input[64];
@@ -228,14 +232,17 @@ int main(void) {
   ok = ok && rung(&p, ffmpeg, &clip[0]) && rung(&p, ffmpeg, &clip[1]);
   int ladder = ok;
   for (int e = 0; ok && e < ENTRIES; e++) {
-    int held = o3(&clip[0], &clip[1], e);
-    int under = projection(&clip[0], &clip[1], e);
+    int held = ENTRY[e].from > 10 || o3(&clip[0], &clip[1], e);
+    int under = ENTRY[e].from > 10 || projection(&clip[0], &clip[1], e);
     ladder = ladder && held && under;
   }
   if (ok && !ladder) printf("FAIL perf: the (s10, s20) checks fail, so s60 does not run\n");
   ok = ladder && rung(&p, ffmpeg, &clip[2]);
-  for (int e = 0; ok && e < ENTRIES; e++) ok = o3(&clip[0], &clip[2], e);
+  for (int e = 0; ok && e < ENTRIES; e++) ok = ENTRY[e].from > 10 || o3(&clip[0], &clip[2], e);
   clean(&p);
-  if (ok) printf("perf: %d runs, R1 equal on each, every peak below the cap %lld, the ladder holds\n", 3 * ENTRIES, CAP);
+  int runs = 0;
+  for (int c = 0; c < 3; c++)
+    for (int e = 0; e < ENTRIES; e++) runs += clip[c].seconds >= ENTRY[e].from;
+  if (ok) printf("perf: %d runs, R1 equal on each, every peak below the cap %lld, the ladder holds\n", runs, CAP);
   return ok ? 0 : 1;
 }

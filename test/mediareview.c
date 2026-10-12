@@ -601,6 +601,112 @@ static void timing_cases(Machine *m) {
   int same = indexed(m, SAME, 3) == 0 && m->diag->code != NULL && strcmp(m->diag->code, "MEDIA_TIMESTAMPS") == 0;
   expect("two frames at one pts is MEDIA_TIMESTAMPS", same);
 }
+/* The M5 decode window fixtures: 4 s with audio, libx264 -g 12 -bf 3.
+   open-gop=0: an IDR key frame at each 12th position. open-gop=1: open GOPs,
+   only position 0 is an IDR picture. */
+static int gop_fixture(const char *ffmpeg, const char *params, const char *path) {
+  char *argv[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+    "testsrc2=size=320x240:rate=25:duration=4", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+    "-c:v", "libx264", "-g", "12", "-bf", "3", "-x264-params", (char *)params, "-pix_fmt", "yuv420p",
+    "-c:a", "aac", "-shortest", (char *)path, NULL};
+  return child(argv) == 0;
+}
+
+/* The decode window of a cut from LO starts at position START. For a START
+   above 0, the window packet is a video key packet with the pts of START. */
+static int window_is(const Source *s, uint64_t lo, uint64_t start) {
+  Window w = decode_window(s, (Span){lo, s->frames - 1u});
+  const AVPacket *p = s->pkts[w.first];
+  int key = p->stream_index == s->vs && (p->flags & AV_PKT_FLAG_KEY) != 0 && p->pts == s->vpts[w.start];
+  return w.start == start && (start == 0 ? w.first == 0 : key);
+}
+
+/* The pts check (D-M5-2): add 1 to vpts[P] (the order stays) and encode keep
+   {13, 30}, a decode window from position 12. The exit status. */
+static int pts_check(Machine *m, Source *s, uint64_t p, const char *path) {
+  Cut cut = {{13, 30}, sample_at(s, 13), sample_at(s, 31), NULL, {{0, 0, 0, NULL}}, 0};
+  int64_t old = s->vpts[p];
+  s->vpts[p] = old + 1;
+  diag_init(m->diag);
+  int status = encode(m, s, &cut, path);
+  s->vpts[p] = old;
+  remove(path);
+  return status;
+}
+
+static int decode_refused(int status, const Diag *d) {
+  return status == 1 && d->code != NULL && strcmp(d->code, "MEDIA_DECODE") == 0;
+}
+
+/* Corrupt an indexed packet, encode {13, 30}, then restore the source. A
+   skipped packet cannot reach the decoder's NAL parser. */
+static int packet_check(Machine *m, Source *s, uint64_t p, const char *path) {
+  for (size_t i = 0; i < s->pkt_count; i++) {
+    AVPacket *pkt = s->pkts[i];
+    if (pkt->stream_index != s->vs || pkt->pts != s->vpts[p])
+      continue;
+    uint8_t *saved = av_memdup(pkt->data, (size_t)pkt->size);
+    if (saved == NULL)
+      return -1;
+    memset(pkt->data, 0, (size_t)pkt->size);
+    Cut cut = {{13, 30}, sample_at(s, 13), sample_at(s, 31), NULL, {{0, 0, 0, NULL}}, 0};
+    diag_init(m->diag);
+    int status = encode(m, s, &cut, path);
+    memcpy(pkt->data, saved, (size_t)pkt->size);
+    av_free(saved);
+    remove(path);
+    return status;
+  }
+  return -1;
+}
+
+/* M5 decode windows on known key layouts, the pts check refusal, and the
+   skip proof: a corrupt packet before the window or after hi builds, while
+   a corrupt packet inside the window is refused by the decoder. */
+static void gop_cases(const char *ffmpeg, const char *dir) {
+  char closed[1100], open[1100], out[1100];
+  snprintf(closed, sizeof closed, "%s/g12.mp4", dir);
+  snprintf(open, sizeof open, "%s/g12open.mp4", dir);
+  snprintf(out, sizeof out, "%s/gop-out.mp4", dir);
+  Diag diag;
+  Machine m;
+  diag_init(&diag);
+  memset(&m, 0, sizeof m);
+  m.diag = &diag;
+  Source s;
+  memset(&s, 0, sizeof s);
+  s.vs = s.as = -1;
+  int status = 2;
+  int made = gop_fixture(ffmpeg, "open-gop=0", closed) && source_open(&m, closed, &s, &status);
+  expect("g12 fixture has 100 frames", made && s.frames == 100);
+  if (made && s.frames == 100) {
+    expect("decode window g12 lo 0 starts at packet 0", window_is(&s, 0, 0));
+    expect("decode window g12 lo 11 starts at packet 0", window_is(&s, 11, 0));
+    expect("decode window g12 lo 12 starts at the key of 12", window_is(&s, 12, 12));
+    expect("decode window g12 lo 13 starts at the key of 12", window_is(&s, 13, 12));
+    expect("decode window g12 lo 99 starts at the key of 96", window_is(&s, 99, 96));
+    expect("a skewed pts at the window start is MEDIA_DECODE exit 1", decode_refused(pts_check(&m, &s, 12, out), &diag));
+    expect("a skewed pts in the window is MEDIA_DECODE exit 1", decode_refused(pts_check(&m, &s, 20, out), &diag));
+    status = packet_check(&m, &s, 20, out);
+    expect("a corrupt packet in the window is MEDIA_ENCODE exit 2", status == 2 && diag.code != NULL && strcmp(diag.code, "MEDIA_ENCODE") == 0);
+    expect("a corrupt packet before the window builds (no decode)", packet_check(&m, &s, 5, out) == 0);
+    expect("a corrupt packet after hi builds (the decode stops)", packet_check(&m, &s, 50, out) == 0);
+  }
+  if (made) source_close(&s);
+  remove(closed);
+  memset(&s, 0, sizeof s);
+  s.vs = s.as = -1;
+  made = gop_fixture(ffmpeg, "open-gop=1", open) && source_open(&m, open, &s, &status);
+  expect("g12open fixture has 100 frames", made && s.frames == 100);
+  if (made && s.frames == 100) {
+    expect("decode window g12open lo 30 starts at packet 0", window_is(&s, 30, 0));
+    expect("decode window g12open lo 40 starts at packet 0 (no IDR at 36)", window_is(&s, 40, 0));
+    expect("decode window g12open lo 99 starts at packet 0 (no IDR at 96)", window_is(&s, 99, 0));
+  }
+  if (made) source_close(&s);
+  remove(open);
+}
+
 int main(void) {
   const char *ffmpeg = getenv("FFMPEG");
   if (ffmpeg == NULL) ffmpeg = "ffmpeg";
@@ -684,6 +790,7 @@ int main(void) {
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
   seek_cases(ffmpeg, dir);
+  gop_cases(ffmpeg, dir);
   vfr_audio_cases(ffmpeg, dir);
   audio_clock_cases(ffmpeg, dir);
   text_escape_cases(dir);

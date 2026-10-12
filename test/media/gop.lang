@@ -1,0 +1,12 @@
+-- Seek programs (M5 Step 3). The pin makes the fixtures (test/gate.sh):
+-- g12.mp4 and g12.mkv have an IDR key frame at each 12th position, g12vfr2.mp4
+-- has 65 frames, and in g12open.mp4 only position 0 is an IDR picture.
+def kbefore : Video -> Video := fun (v : Video) => trim (interval 10 30) v
+def kat : Video -> Video := fun (v : Video) => trim (interval 24 47) v
+def kafter : Video -> Video := fun (v : Video) => trim (interval 25 40) v
+def klast : Video -> Video := fun (v : Video) => trim (interval 50 99) v
+def kone : Video -> Video := fun (v : Video) => trim (interval 37 37) v
+def knest : Video -> Video := fun (v : Video) => trim (interval 30 70) (trim (interval 20 80) v)
+def kburn : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 44 52) "Hi") nil) (trim (interval 40 60) v)
+def kvfr : Video -> Video := fun (v : Video) => trim (interval 13 50) v
+def kopen : Video -> Video := fun (v : Video) => trim (interval 40 60) v
