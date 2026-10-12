@@ -62,6 +62,32 @@ static int frame_hashes(const char *ffmpeg, const char *input, const char *outpu
   return child(argv) == 0;
 }
 
+/* Our build of ENTRY on INPUT and the reference command give equal framemd5
+   lines for all streams (R1). */
+static int equals_ffmpeg(Machine *m, const char *ffmpeg, const char *entry, const char *input, const char *dir) {
+  char ours[1200], ref[1200], oh[1200], rh[1200];
+  snprintf(ours, sizeof ours, "%s/vfr-ours.mp4", dir);
+  snprintf(ref, sizeof ref, "%s/vfr-ref.mp4", dir);
+  snprintf(oh, sizeof oh, "%s/vfr-ours.md5", dir);
+  snprintf(rh, sizeof rh, "%s/vfr-ref.md5", dir);
+  char *inputs[] = {(char *)input};
+  FILE *command = tmpfile();
+  int ok = command != NULL && media_build(m, entry, inputs, 1, ours) == 0
+    && media_ffmpeg(m, entry, inputs, 1, ref, command) == 0;
+  if (ok) {
+    char line[8192];
+    rewind(command);
+    size_t n = fread(line, 1, sizeof line - 1u, command);
+    line[n] = '\0';
+    char *argv[] = {"sh", "-c", line, NULL};
+    ok = !ferror(command) && n < sizeof line - 1u && child(argv) == 0
+      && frame_hashes(ffmpeg, ours, oh) && frame_hashes(ffmpeg, ref, rh) && same_file(oh, rh);
+  }
+  if (command != NULL) fclose(command);
+  remove(ours); remove(ref); remove(oh); remove(rh);
+  return ok;
+}
+
 /* VFR sources can have audio timestamp gaps. The sample cut is still
    atrim by sample count, but asetpts must keep each sample's timing.
    Matroska's 1 ms clock must not create gaps in continuous audio. */
@@ -81,11 +107,7 @@ static void vfr_audio_cases(const char *ffmpeg, const char *dir) {
   diag_init(&diag);
   int loaded = front_load(&arena, "vfr-audio.lang", program, strlen(program), &decls, &diag)
     && check_program(&arena, &decls, &m, &diag);
-  char input[1200], ours[1200], ref[1200], oh[1200], rh[1200];
-  snprintf(ours, sizeof ours, "%s/vfr-ours.mp4", dir);
-  snprintf(ref, sizeof ref, "%s/vfr-ref.mp4", dir);
-  snprintf(oh, sizeof oh, "%s/vfr-ours.md5", dir);
-  snprintf(rh, sizeof rh, "%s/vfr-ref.md5", dir);
+  char input[1200];
   for (unsigned gap = 0; gap < 2; gap++) {
     for (unsigned container = 0; container < 2; container++) {
       snprintf(input, sizeof input, "%s/vfr-audio.%s", dir, containers[container]);
@@ -96,30 +118,56 @@ static void vfr_audio_cases(const char *ffmpeg, const char *dir) {
         "-c:a", "aac", input, NULL};
       int made = loaded && child(args) == 0;
       for (unsigned entry = 0; entry < sizeof entries / sizeof entries[0]; entry++) {
-        char *inputs[] = {input};
-        FILE *command = tmpfile();
         diag_init(&diag);
-        int ok = made && command != NULL && media_build(&m, entries[entry], inputs, 1, ours) == 0
-          && media_ffmpeg(&m, entries[entry], inputs, 1, ref, command) == 0;
-        if (ok) {
-          char line[8192];
-          rewind(command);
-          size_t n = fread(line, 1, sizeof line - 1u, command);
-          line[n] = '\0';
-          char *argv[] = {"sh", "-c", line, NULL};
-          ok = !ferror(command) && n < sizeof line - 1u && child(argv) == 0
-            && frame_hashes(ffmpeg, ours, oh) && frame_hashes(ffmpeg, ref, rh) && same_file(oh, rh);
-        }
-        if (command != NULL) fclose(command);
         char name[128];
         snprintf(name, sizeof name, "VFR %s %s audio %s equals ffmpeg", containers[container],
                  gap ? "gapped" : "continuous", entries[entry]);
-        expect(name, ok);
-        remove(ours); remove(ref); remove(oh); remove(rh);
+        expect(name, made && equals_ffmpeg(&m, ffmpeg, entries[entry], input, dir));
       }
       remove(input);
     }
   }
+  arena_release(&arena);
+}
+
+/* The CLI audio clock on the Matroska 1 ms clock: a new sample clock after
+   each timestamp gap (1 ms gaps here), and the input shift by the container
+   start time (7 ms here) before the rounding to samples. */
+static void audio_clock_cases(const char *ffmpeg, const char *dir) {
+  Arena arena;
+  Diag diag;
+  Machine m;
+  DeclList decls;
+  const char *program =
+    "def whole : Video -> Video := fun (v : Video) => v\n"
+    "def cut : Video -> Video := fun (v : Video) => trim (interval 10 25) v\n"
+    "def nested : Video -> Video := fun (v : Video) => trim (interval 12 25) (trim (interval 10 29) v)\n";
+  const char *entries[] = {"whole", "cut", "nested"};
+  const char *kinds[] = {"1 ms packet gaps", "start time 7 ms"};
+  arena_init(&arena, (size_t)64 << 20);
+  diag_init(&diag);
+  int loaded = front_load(&arena, "audio-clock.lang", program, strlen(program), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  char base[1200], input[1200];
+  snprintf(base, sizeof base, "%s/clock-base.mkv", dir);
+  snprintf(input, sizeof input, "%s/clock.mkv", dir);
+  char *make[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+    "testsrc2=size=160x120:rate=25:duration=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+    "-af", "aselect='not(between(t,0.5,0.75))'", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", base, NULL};
+  int based = loaded && child(make) == 0;
+  for (unsigned kind = 0; kind < 2; kind++) {
+    char *remux[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", base, "-c", "copy",
+      kind ? "-output_ts_offset" : "-bsf:a", kind ? "0.007" : "setts=ts=TS+N", input, NULL};
+    int made = based && child(remux) == 0;
+    for (unsigned entry = 0; entry < sizeof entries / sizeof entries[0]; entry++) {
+      diag_init(&diag);
+      char name[128];
+      snprintf(name, sizeof name, "mkv audio %s %s equals ffmpeg", kinds[kind], entries[entry]);
+      expect(name, made && equals_ffmpeg(&m, ffmpeg, entries[entry], input, dir));
+    }
+    remove(input);
+  }
+  remove(base);
   arena_release(&arena);
 }
 
@@ -592,6 +640,7 @@ int main(void) {
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
   vfr_audio_cases(ffmpeg, dir);
+  audio_clock_cases(ffmpeg, dir);
   text_escape_cases(dir);
   plan_cases(input);
   escaper_cases();

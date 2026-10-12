@@ -140,6 +140,8 @@ typedef struct {
   int64_t apts;      /* the next sample pts in the current audio span */
   int64_t aorigin;   /* the pts of the first kept audio sample */
   int64_t adelta;    /* sample clock for coarse container timestamps */
+  int64_t anext;     /* the predicted pts of the next decoded audio frame */
+  int64_t ashift;    /* the CLI input shift: minus the container start time */
   int astarted;
   int aremaining;
   uint64_t mask;     /* the burns of the live graph */
@@ -888,6 +890,9 @@ static const char *enc_open(Enc *e, const Source *s, const char *path, const cha
   e->vst->avg_frame_rate = s->fr;
   if (e->aenc != NULL) {
     e->adelta = AV_NOPTS_VALUE;
+    e->anext = AV_NOPTS_VALUE;
+    e->ashift = s->fmt->start_time == AV_NOPTS_VALUE ? 0
+      : av_rescale_q(-s->fmt->start_time, AV_TIME_BASE_Q, s->fmt->streams[s->as]->time_base);
     int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
     e->fifo = av_audio_fifo_alloc(e->aenc->sample_fmt, e->aenc->ch_layout.nb_channels, size);
     e->audio_times = av_fifo_alloc2(8, sizeof(AudioSpan), AV_FIFO_FLAG_AUTO_GROW);
@@ -1035,11 +1040,18 @@ static int audio_chunk(Enc *e, int n) {
 static int audio_keep(Enc *e, const AVFrame *f) {
   int64_t lo = e->seen;
   int64_t hi = e->seen + f->nb_samples;
-  /* Match the CLI's audio clock: keep real gaps, but do not turn rounded
-     container timestamps into sample gaps (e.g. a Matroska 1 ms clock). */
-  int64_t pts = f->pts == AV_NOPTS_VALUE ? lo
-    : av_rescale_delta(e->src->fmt->streams[e->src->as]->time_base, f->pts,
-                       e->aenc->time_base, f->nb_samples, &e->adelta, e->aenc->time_base);
+  /* Match the CLI's audio clock (fftools audio_ts_process): keep real gaps,
+     but do not turn rounded container timestamps into sample gaps (e.g. a
+     Matroska 1 ms clock). The CLI shifts the input by the container start
+     time, starts a new sample clock after a gap, and gives a frame without
+     a pts the predicted pts. */
+  AVRational tb = e->aenc->time_base;
+  AVRational in = f->pts == AV_NOPTS_VALUE ? tb : e->src->fmt->streams[e->src->as]->time_base;
+  int64_t ts = f->pts == AV_NOPTS_VALUE ? (e->anext == AV_NOPTS_VALUE ? 0 : e->anext) : f->pts + e->ashift;
+  if (f->pts != AV_NOPTS_VALUE && e->anext != AV_NOPTS_VALUE && ts > av_rescale_q_rnd(e->anext, tb, in, AV_ROUND_UP))
+    e->adelta = AV_NOPTS_VALUE;
+  int64_t pts = av_rescale_delta(in, ts, tb, f->nb_samples, &e->adelta, tb);
+  e->anext = pts + f->nb_samples;
   int64_t a = lo > e->cut.astart ? lo : e->cut.astart;
   int64_t b = hi < e->cut.aend ? hi : e->cut.aend;
   e->seen = hi;
