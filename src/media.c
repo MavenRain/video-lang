@@ -304,6 +304,10 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
     v = v->args[row == 4 ? 2 : 1];
     row = step_row(v);
   }
+  /* video-lang M6 Step 3 site: a stuck concat (OP_CONCAT) makes a segment
+     list here (D-M6-5), and CONCAT_SHAPE refuses operands that differ in
+     size, pixel format, audio presence, sample rate or channel layout
+     (D-M6-3). Until Step 3 a concat residual refuses as MEDIA_SHAPE. */
   if (v->kind != VAL_VAR || v->nat >= level || (plan->fonts >> v->nat & 1u))
     return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a chain of trim, scale, crop, pad and burnText over an input");
   plan->input = (uint32_t)v->nat;

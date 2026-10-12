@@ -1,0 +1,1 @@
+def bad : Video -> Video := fun (v : Video) => concat (interval 0 9) v

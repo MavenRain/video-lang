@@ -29,3 +29,6 @@ style-pos.lang STYLE_POS
 text-mismatch.lang TYPE_MISMATCH
 burntext-track.lang TYPE_MISMATCH
 style-pos-y.lang STYLE_POS
+concat-first.lang TYPE_MISMATCH
+concat-second.lang TYPE_MISMATCH
+concat-arity.lang TYPE_ARITY

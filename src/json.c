@@ -297,6 +297,10 @@ static int op_json(Out *o, const Value *type, const Value *v) {
   case OP_STYLE:
   case OP_MK_STYLE:
   case OP_BURN_TEXT:
+  /* video-lang M6: a concat residual is never an instance (its entry has
+     Video parameters). The host reads it as a segment list and refuses a
+     shape mismatch as CONCAT_SHAPE (src/media.c plan_of, Step 3). */
+  case OP_CONCAT:
     return internal(o, "a type that is not a type former");
   }
   return internal(o, "an unknown operation");

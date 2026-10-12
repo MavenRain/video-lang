@@ -29,7 +29,7 @@ static const char *const OP_NAMES[] = {
   [OP_MK_RECT] = "rect", [OP_PAD_SPEC] = "PadSpec", [OP_MK_PAD_SPEC] = "padSpec",
   [OP_SCALE] = "scale", [OP_CROP] = "crop", [OP_PAD] = "pad",
   [OP_TEXT] = "Text", [OP_FONT] = "Font", [OP_STYLE] = "Style", [OP_MK_STYLE] = "style",
-  [OP_BURN_TEXT] = "burnText"
+  [OP_BURN_TEXT] = "burnText", [OP_CONCAT] = "concat"
 };
 
 /* The number of arguments of each operation. VARIES: it comes from the
@@ -49,7 +49,8 @@ static const unsigned char OP_ARITY[] = {
   [OP_VIDEO] = 0, [OP_INTERVAL] = 0, [OP_MK_INTERVAL] = 2, [OP_TRIM] = 2, [OP_INTERSECT] = 2,
   [OP_RESOLUTION] = 0, [OP_MK_RES] = 2, [OP_RECT] = 0, [OP_MK_RECT] = 4, [OP_PAD_SPEC] = 0,
   [OP_MK_PAD_SPEC] = 5, [OP_SCALE] = 2, [OP_CROP] = 2, [OP_PAD] = 2,
-  [OP_TEXT] = 0, [OP_FONT] = 0, [OP_STYLE] = 0, [OP_MK_STYLE] = 5, [OP_BURN_TEXT] = 3
+  [OP_TEXT] = 0, [OP_FONT] = 0, [OP_STYLE] = 0, [OP_MK_STYLE] = 5, [OP_BURN_TEXT] = 3,
+  [OP_CONCAT] = 2
 };
 
 typedef enum {
@@ -891,6 +892,17 @@ static const Value *reduce_video(Machine *m, Op op, const Value *const *a, uint3
   return internal(m, "a media operation on a Video that is not an input");
 }
 
+/* video-lang M6: concat a b is stuck when either operand is neutral. Each
+   operand is a Video: an input or the residual of a media operation. The
+   build reads the stuck node as a segment list (src/media.c, Step 3). The
+   evaluator never rewrites by a law (D1, D-M6-4). */
+static const Value *reduce_concat(Machine *m, const Value *const *a, uint32_t n) {
+  const Value *out;
+  if (blocked(m, a[0], OP_CONCAT, 0, 0, a, n, &out) || blocked(m, a[1], OP_CONCAT, 0, 0, a, n, &out))
+    return out;
+  return internal(m, "a concat of a Video that is not an input");
+}
+
 /* 1 when V is `interval lo hi` with numeric ends. Else *OUT is the trap or
    the stuck intersect. */
 static int interval_ends(Machine *m, const Value *v, const Value *const *a, uint32_t n, uint64_t *lo, uint64_t *hi, const Value **out) {
@@ -991,6 +1003,8 @@ static const Value *reduce_op(Machine *m, Op op, uint32_t inst, uint32_t field, 
   case OP_PAD:
   case OP_BURN_TEXT:
     return reduce_video(m, op, a, n);
+  case OP_CONCAT:
+    return reduce_concat(m, a, n);
   case OP_INTERSECT:
     return reduce_intersect(m, a, n);
   case OP_FIRST:

@@ -86,7 +86,9 @@ typedef enum {
   OP_FONT,
   OP_STYLE,
   OP_MK_STYLE,
-  OP_BURN_TEXT
+  OP_BURN_TEXT,
+  /* video-lang M6 */
+  OP_CONCAT
 } Op;
 
 /* The instance of pure, map, bind and filter (formers F5 and F8). */

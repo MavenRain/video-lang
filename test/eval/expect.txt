@@ -27,3 +27,9 @@ text greeting => "Hi"
 text quoted => "say \"cut\" \\ go"
 text symbols => "é€𝄞"
 text track => cons (pair (interval 5 9) "Hi") nil
+concat main => fun a => fun b => concat a b
+concat twice => fun v => concat v v
+concat seam => fun a => fun b => trim (interval 5 15) (concat a b)
+concat assoc => fun a => fun b => fun c => concat (concat a b) c
+concat scaled => fun a => fun b => concat (scale (res 160 120) a) (scale (res 160 120) b)
+concat segments => 2

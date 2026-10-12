@@ -144,7 +144,9 @@ static const Builtin BUILTINS[] = {
   {"Font", 0, RULE_TYPE0, OP_FONT, OP_NAT, 0},
   {"Style", 0, RULE_TYPE0, OP_STYLE, OP_NAT, 0},
   {"style", 5, RULE_NATS, OP_MK_STYLE, OP_STYLE, 0},
-  {"burnText", 3, RULE_MEDIA, OP_BURN_TEXT, OP_VIDEO, 0}
+  {"burnText", 3, RULE_MEDIA, OP_BURN_TEXT, OP_VIDEO, 0},
+  /* video-lang M6 */
+  {"concat", 2, RULE_MEDIA, OP_CONCAT, OP_VIDEO, 0}
 };
 
 #define BUILTIN_COUNT ((uint32_t)(sizeof BUILTINS / sizeof BUILTINS[0]))
@@ -905,9 +907,10 @@ static const Core *rule_nats(Call *k) {
   return term;
 }
 
-/* The type of the first argument of a media op. */
+/* The type of the first argument of a media op. concat (video-lang M6) takes
+   two Videos. */
 static Op media_first(Op op) {
-  return op == OP_SCALE ? OP_RESOLUTION : op == OP_CROP ? OP_RECT : op == OP_PAD ? OP_PAD_SPEC : OP_INTERVAL;
+  return op == OP_SCALE ? OP_RESOLUTION : op == OP_CROP ? OP_RECT : op == OP_PAD ? OP_PAD_SPEC : op == OP_CONCAT ? OP_VIDEO : OP_INTERVAL;
 }
 
 /* video-lang M2: burnText s track v : Video, with s : Style and
@@ -925,7 +928,8 @@ static const Core *rule_burn_text(Call *k) {
 }
 
 /* video-lang K0 and M1: trim i v, scale r v, crop q v and pad p v : Video,
-   and intersect i j : Option Interval. M2 adds burnText. */
+   and intersect i j : Option Interval. M2 adds burnText. M6 adds
+   concat a b : Video. */
 static const Core *rule_media(Call *k) {
   Checker *c = k->c;
   if (k->b->op == OP_BURN_TEXT)

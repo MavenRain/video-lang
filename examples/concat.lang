@@ -1,0 +1,9 @@
+-- Concatenation (video-lang M6): concat a b is the sequence a followed by b.
+-- A Video is an input, so each definition reduces to a residual term with
+-- one concat node per concat. The evaluator does not apply the laws (D1).
+def main : Video -> Video -> Video := fun (a : Video) (b : Video) => concat a b
+def twice : Video -> Video := fun (v : Video) => concat v v
+def seam : Video -> Video -> Video := fun (a : Video) (b : Video) => trim (interval 5 15) (concat a b)
+def assoc : Video -> Video -> Video -> Video := fun (a : Video) (b : Video) (c : Video) => concat (concat a b) c
+def scaled : Video -> Video -> Video := fun (a : Video) (b : Video) => concat (scale (res 160 120) a) (scale (res 160 120) b)
+def segments : Nat := 2
