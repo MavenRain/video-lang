@@ -707,6 +707,37 @@ static void gop_cases(const char *ffmpeg, const char *dir) {
   remove(open);
 }
 
+/* A rawvideo decoder has no delay: it gives position hi - 1 before it gets
+   the packet of hi. The decode must send that packet and stop after hi. */
+static void raw_cases(const char *ffmpeg, const char *dir) {
+  char raw[1100], out[1100];
+  snprintf(raw, sizeof raw, "%s/raw.mkv", dir);
+  snprintf(out, sizeof out, "%s/raw-out.mp4", dir);
+  char *argv[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+    "testsrc2=size=160x120:rate=25:duration=4", "-f", "lavfi", "-i", "sine=frequency=440:duration=4",
+    "-c:v", "rawvideo", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", raw, NULL};
+  Diag diag;
+  Machine m;
+  diag_init(&diag);
+  memset(&m, 0, sizeof m);
+  m.diag = &diag;
+  Source s;
+  memset(&s, 0, sizeof s);
+  s.vs = s.as = -1;
+  int status = 2;
+  int made = child(argv) == 0 && source_open(&m, raw, &s, &status);
+  expect("rawvideo fixture has more than 31 frames", made && s.frames > 31);
+  if (made && s.frames > 31) {
+    Cut cut = {{13, 30}, sample_at(&s, 13), sample_at(&s, 31), NULL, {{0, 0, 0, NULL}}, 0};
+    diag_init(&diag);
+    status = encode(&m, &s, &cut, out);
+    expect("a decoder without delay gives position hi (rawvideo {13, 30})", status == 0 && exists(out));
+    remove(out);
+  }
+  if (made) source_close(&s);
+  remove(raw);
+}
+
 int main(void) {
   const char *ffmpeg = getenv("FFMPEG");
   if (ffmpeg == NULL) ffmpeg = "ffmpeg";
@@ -791,6 +822,7 @@ int main(void) {
   spatial_sar_cases(ffmpeg, dir);
   seek_cases(ffmpeg, dir);
   gop_cases(ffmpeg, dir);
+  raw_cases(ffmpeg, dir);
   vfr_audio_cases(ffmpeg, dir);
   audio_clock_cases(ffmpeg, dir);
   text_escape_cases(dir);
