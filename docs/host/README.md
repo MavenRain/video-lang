@@ -57,7 +57,9 @@ with the options of the ffmpeg CLI. The audio stream is optional. Constant
 and variable frame rate sources are accepted. Video pts keep the source
 timing relative to the first kept frame, rounded to the encoder time base
 `1/fr` (M4-R2). The last frame keeps its own duration. Audio pts keep gaps
-relative to the first kept audio sample. The host refuses missing video
+relative to the first kept audio sample. Like the ffmpeg CLI, the host
+subtracts the container start time from audio pts before the sample
+rounding; a gap starts a new sample clock. The host refuses missing video
 pts, duplicate pts, no positive rate, or kept pts that collide after
 rounding (`MEDIA_TIMESTAMPS`).
 

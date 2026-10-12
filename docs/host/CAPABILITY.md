@@ -34,7 +34,7 @@ this repository.
   `test/parse/expect.txt`).
 - `Video` and `Font` values come only from the inputs of a media entry.
   A media entry returns `Video`; each parameter has type `Video` or
-  `Font` (`MEDIA_TYPE`, `src/media.c:255`).
+  `Font` (`MEDIA_TYPE`, `src/media.c:257`).
 
 ## Limits
 
@@ -53,7 +53,7 @@ this repository.
   chain of at most 65536 bytes (`src/media.c:34-37`, refusal `MEDIA_LIMIT`).
   A media plan has at most 64 text entries in total across all
   `burnText` steps, because the build keeps the active entries in one
-  64-bit mask (`src/media.c:207`, refusal `TEXT_LIMIT`).
+  64-bit mask (`src/media.c:209`, refusal `TEXT_LIMIT`).
 - At 1080p, the peak resident memory of a build was 873 MB to 936 MB for
   250 to 1500 frames (`make perf`, `probe/CAPABILITY.md` section 6).
 
@@ -66,14 +66,17 @@ this repository.
   (`src/json.h:15`).
 - `langc build PROG MAIN IN... -o OUT` writes a media file. It writes a
   temporary file first and renames it to OUT only when the build succeeds
-  (`src/media.c:1137`). The encoders are the defaults of the container
-  (`src/media.c:730`). Constant and variable frame rate video is accepted.
+  (`src/media.c:1149`). The encoders are the defaults of the container
+  (`src/media.c:732`). Constant and variable frame rate video is accepted.
   Pts keep source timing relative to the first kept frame, rounded to
   `1/fr`; the last frame keeps its own duration. Audio keeps timestamp
-  gaps relative to the first kept sample. Missing video pts, duplicate
-  pts, no positive rate, and kept pts that collide after rounding are
-  `MEDIA_TIMESTAMPS` refusals (`src/media.c:339`, `:623`).
+  gaps relative to the first kept sample. Like the ffmpeg CLI, the host
+  subtracts the container start time from audio pts before the sample
+  rounding; a gap starts a new sample clock (`src/media.c:1040`).
+  Missing video pts, duplicate pts, no positive rate, and kept pts that
+  collide after rounding are `MEDIA_TIMESTAMPS` refusals
+  (`src/media.c:341`, `:625`).
 - `langc ffmpeg PROG MAIN IN... -o OUT` prints the ffmpeg command for the
   same program with `-fps_mode passthrough`, and that command writes OUT
-  (`src/media.c:680`). The decoded frames of the two outputs are equal in
+  (`src/media.c:682`). The decoded frames of the two outputs are equal in
   all 40 media R1 gate cases, over all streams.

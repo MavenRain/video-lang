@@ -3,13 +3,13 @@
 Date: 2026-10-11. TinyCC 0.9.28rc (AArch64 Darwin), Apple clang 21.0.0,
 Homebrew `ffmpeg-full` 9.0.2 (libavformat 63.1.102), Node 23.10.0. Host
 executable: `build/langc`. The source files are the same as at commit
-fedc686.
+7246d40.
 
 ## The gate
 
 `make check FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full` passes with zero
 failures. It builds `build/langc` and the C test programs with TinyCC, and
-`make check-clang` gives no warnings. It runs 333 cases:
+`make check-clang` gives no warnings. It runs 339 cases:
 
 | Group | Cases | Source |
 |---|---|---|
@@ -25,7 +25,7 @@ failures. It builds `build/langc` and the C test programs with TinyCC, and
 | regressions | 6 | `test/regressions.js` |
 | printer | 2 | `test/printer-regressions.js` |
 | media regressions | 52 | `test/mediatool.c` |
-| media IO | 80 | `test/mediareview.c` |
+| media IO | 86 | `test/mediareview.c` |
 | perf comparator | 7 | `test/mediaperfcheck.c` |
 
 A media R1 case runs `langc build` and the `langc ffmpeg` command on the
@@ -44,7 +44,8 @@ rules make the inputs with ffmpeg: `testsrc2` 1920x1080 at 25 fps and a
 440 Hz `sine` track, 10, 20 and 60 seconds (s10 7181977, s20 14470717, s60
 43413000 bytes). OURS is `langc build`. REF is the `langc ffmpeg` command.
 RSS is the peak resident size in bytes (`ru_maxrss`), and the times are in
-seconds.
+seconds. The table is from commit fedc686: commit 7246d40 changes the
+audio pts only, not the encode loop.
 
 | Input | Entry | Frames | OURS RSS | REF RSS | OURS s | REF s | R1 |
 |---|---|---|---|---|---|---|---|

@@ -114,27 +114,27 @@ larger literal gives `LEX_NAT_RANGE` (`src/front/lexer.c:138`). The
 eliminator is `fold` over `Nat`. A frame position is a `Nat`. A literal
 `interval lo hi` with lo > hi gives `INTERVAL_RANGE`. The media build
 refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
-`src/media.c:290`). Gate rows: the two `trap` rows in
+`src/media.c:292`). Gate rows: the two `trap` rows in
 `test/eval/expect.txt`.
 
 ## 5. How a result leaves the host
 
 `langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
 process (libavfilter graphs and `sws_scale`) and encodes OUT with the
-default encoders of the container (`src/media.c:730`; libx264 and aac for
+default encoders of the container (`src/media.c:732`; libx264 and aac for
 .mp4). It writes a temporary file and renames it to OUT only when the build
-succeeds (`src/media.c:1137`). R1 compares the decoded frames of OUT with
+succeeds (`src/media.c:1149`). R1 compares the decoded frames of OUT with
 the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
 (`fm`, `test/gate.sh:161`). R1 does not compare the file bytes. Evidence:
 media R1 40 rows, P4, P8, P17 and P17b. An input must have yuv420p video
-(`MEDIA_FORMAT`, `src/media.c:377`). Constant and variable frame rate video
+(`MEDIA_FORMAT`, `src/media.c:379`). Constant and variable frame rate video
 is accepted (M4-R1). Pts keep source timing relative to the first kept
 frame, rounded to `1/fr`; the last frame keeps its own duration (M4-R2).
 Missing video pts, duplicate source pts, no positive rate, and kept pts
 that collide after rounding are `MEDIA_TIMESTAMPS` refusals
-(`src/media.c:339`, `:623`). The reference uses `-fps_mode passthrough`.
+(`src/media.c:341`, `:625`). The reference uses `-fps_mode passthrough`.
 Audio is optional; when present, it must be fltp with a positive sample
-rate (`src/media.c:382`). Its pts keep gaps relative to the first kept
+rate (`src/media.c:384`). Its pts keep gaps relative to the first kept
 sample, as the C media IO cases verify on mp4 and Matroska sources.
 
 ## 6. Cost
@@ -167,7 +167,7 @@ program cannot declare a family (`REFUSE_DATA`,
 `src/front/check.c:1519`). `SubtitleTrack` is a definition, not a family:
 `List (Prod Interval Text)` (`domain/video.lang:12`). `Video` and `Font`
 have no constructor. Their values come only from the inputs of a media
-entry (`MEDIA_TYPE`, `src/media.c:267`).
+entry (`MEDIA_TYPE`, `src/media.c:269`).
 
 ## 8. Sigma projection and eta
 

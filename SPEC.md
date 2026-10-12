@@ -76,7 +76,7 @@ at check time when the field is a literal, and at evaluation otherwise
 (`src/front/check.c:899-904`).
 
 A media entry returns `Video`. Each parameter has type `Video` or `Font`
-(`MEDIA_TYPE`, `src/media.c:255-267`). The command line binds IN... to the
+(`MEDIA_TYPE`, `src/media.c:257-269`). The command line binds IN... to the
 parameters in order (`MEDIA_ARGS`). A program contains no file path (O-1).
 
 ## 3. Type formers
@@ -150,12 +150,12 @@ only), the composition of two resolutions (D1), an encode specification
 over one input. It runs the steps in process with the FFmpeg libraries and
 encodes with the default encoders of the container, libx264 and aac for
 `.mp4` (O-5). It writes a temporary file and renames it to OUT only when
-the encode succeeds (`src/media.c:1108`, `:1137`). Positions start again
+the encode succeeds (`src/media.c:1120`, `:1149`). Positions start again
 from 0 at encode (O-2). The video keeps the source timing relative to its
 first kept frame, rounded to the encoder time base (M4-R2). An output with
 no frame is a refusal, and no file is written (D3). `langc ffmpeg` prints
 `ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT` for the same
-program (`src/media.c:680`). The proofs and the types erase:
+program (`src/media.c:682`). The proofs and the types erase:
 only the steps reach the output.
 
 The build refuses with these codes (`src/media.c`):
@@ -253,6 +253,8 @@ because the compiler refuses `axiom` (section 10 of the probe).
   from `av_guess_frame_rate`. Pts round to the nearest tick, with ties up
   (P17b); the last frame keeps its own duration in those ticks (P17).
   Audio pts start at 0 (`asetpts=PTS-STARTPTS`) and keep timestamp gaps.
+  Like the ffmpeg CLI, the host subtracts the container start time from
+  audio pts before the sample rounding; a gap starts a new sample clock.
   The reference uses `-fps_mode passthrough`. A video without a positive
   rate, a frame without pts, duplicate source pts, or two kept frames that
   round to one output pts is a refusal (`MEDIA_TIMESTAMPS`). The gate
@@ -264,6 +266,8 @@ because the compiler refuses `axiom` (section 10 of the probe).
 - O-4. Probe-forced (P7): the audio of frame p is the audio from the time of
   p to the time of p + 1. The last frame keeps the audio to the end of the
   stream. The reference is `atrim` with the same audio positions.
+  Known limit: the sample count ignores gaps, so after a gap of G a cut
+  keeps audio G later than its first frame, as `atrim` does.
 - O-5. Default: encode uses the container defaults of the ffmpeg command
   (libx264 and aac for `.mp4`). There is no encode specification.
 - O-6. Default: the name is video-lang.
