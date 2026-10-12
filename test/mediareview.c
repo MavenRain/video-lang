@@ -88,6 +88,50 @@ static int equals_ffmpeg(Machine *m, const char *ffmpeg, const char *entry, cons
   return ok;
 }
 
+/* Seeking must preserve R1 for closed and open GOPs and gradual intra
+   refresh. A recovery-point key packet may need later frames to recover. */
+static void seek_cases(const char *ffmpeg, const char *dir) {
+  Arena arena;
+  Diag diag;
+  Machine m;
+  DeclList decls;
+  const char *program =
+    "def mid : Video -> Video := fun (v : Video) => trim (interval 50 69) v\n"
+    "def tail : Video -> Video := fun (v : Video) => trim (interval 90 99) v\n";
+  arena_init(&arena, (size_t)64 << 20);
+  diag_init(&diag);
+  int loaded = front_load(&arena, "seek.lang", program, strlen(program), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  expect("seek program loads", loaded);
+  if (!loaded) { arena_release(&arena); return; }
+  const char *kinds[] = {"closed", "open", "recovery"};
+  const char *params[] = {
+    "keyint=25:scenecut=0:bframes=3",
+    "open-gop=1:keyint=25:scenecut=0:bframes=3",
+    "intra-refresh=1:keyint=25:scenecut=0:bframes=0"
+  };
+  const char *containers[] = {"mp4", "mkv", "ts"};
+  const char *entries[] = {"mid", "tail"};
+  for (size_t container = 0; container < sizeof containers / sizeof containers[0]; container++) {
+    for (size_t kind = 0; kind < sizeof kinds / sizeof kinds[0]; kind++) {
+      char input[1200];
+      snprintf(input, sizeof input, "%s/seek-%s.%s", dir, kinds[kind], containers[container]);
+      char *args[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc2=size=320x240:rate=25:duration=4", "-c:v", "libx264", "-x264-params", (char *)params[kind],
+        "-pix_fmt", "yuv420p", input, NULL};
+      int made = child(args) == 0;
+      for (size_t entry = 0; entry < sizeof entries / sizeof entries[0]; entry++) {
+        diag_init(&diag);
+        char name[160];
+        snprintf(name, sizeof name, "seek %s %s %s equals ffmpeg", containers[container], kinds[kind], entries[entry]);
+        expect(name, made && equals_ffmpeg(&m, ffmpeg, entries[entry], input, dir));
+      }
+      remove(input);
+    }
+  }
+  arena_release(&arena);
+}
+
 /* VFR sources can have audio timestamp gaps. The sample cut is still
    atrim by sample count, but asetpts must keep each sample's timing.
    Matroska's 1 ms clock must not create gaps in continuous audio. */
@@ -639,6 +683,7 @@ int main(void) {
   source_close(&src);
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
+  seek_cases(ffmpeg, dir);
   vfr_audio_cases(ffmpeg, dir);
   audio_clock_cases(ffmpeg, dir);
   text_escape_cases(dir);

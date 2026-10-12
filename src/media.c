@@ -113,6 +113,13 @@ typedef struct {
   uint32_t burn_count;
 } Cut;
 
+/* The decode window of a cut (D-M5-1, D-M5-6): the video decode starts at
+   packet FIRST in file order, and its first frame is position START. */
+typedef struct {
+  size_t first;
+  uint64_t start;
+} Window;
+
 typedef struct {
   int64_t pts;
   int samples;
@@ -136,6 +143,8 @@ typedef struct {
   AVFilterContext *bsink;
   AVFrame *filtered;
   uint64_t position; /* the next video position out of the decoder */
+  int skewed;        /* a decoded frame does not have the pts of its position */
+  int64_t skew_pts;  /* the pts of that frame */
   int64_t seen;      /* audio samples out of the decoder */
   int64_t apts;      /* the next sample pts in the current audio span */
   int64_t aorigin;   /* the pts of the first kept audio sample */
@@ -147,6 +156,7 @@ typedef struct {
   uint64_t mask;     /* the burns of the live graph */
   const Source *src;
   Cut cut;
+  Window window;
   char chain[FILTER_MAX];
 } Enc;
 
@@ -424,6 +434,58 @@ static int64_t out_pts(const Source *s, uint64_t lo, uint64_t p) {
    base 1/fr, as fftools sets it (video_sync_process). */
 static int64_t out_duration(const Source *s, int64_t d) {
   return llrint((double)d * av_q2d(s->fmt->streams[s->vs]->time_base) / av_q2d(av_inv_q(s->fr)));
+}
+
+/* H.264 recovery points also have the key flag, but gradual intra refresh
+   can require later pictures before decoding recovers. Only an IDR picture
+   is an immediate start. Accept both length-prefixed AVC and Annex B NALs. */
+static int decode_key(const Source *s, const AVPacket *pkt) {
+  if ((pkt->flags & AV_PKT_FLAG_KEY) == 0)
+    return 0;
+  const AVCodecParameters *par = s->fmt->streams[s->vs]->codecpar;
+  if (par->codec_id != AV_CODEC_ID_H264)
+    return 1;
+  const uint8_t *data = pkt->data;
+  size_t size = (size_t)pkt->size;
+  if (par->extradata_size >= 5 && par->extradata[0] == 1) {
+    size_t length = (par->extradata[4] & 3u) + 1u;
+    size_t at = 0;
+    while (size - at >= length) {
+      size_t n = 0;
+      for (size_t j = 0; j < length; j++)
+        n = (n << 8) | data[at++];
+      if (n == 0 || n > size - at)
+        return 0;
+      if ((data[at] & 31u) == 5u)
+        return 1;
+      at += n;
+    }
+  } else {
+    for (size_t i = 2; i + 1u < size; i++) {
+      if (data[i - 2u] == 0 && data[i - 1u] == 0 && data[i] == 1 && (data[i + 1u] & 31u) == 5u)
+        return 1;
+    }
+  }
+  return 0;
+}
+
+/* The decode window of KEEP (D-M5-1, D-M5-6). It starts at the last decode
+   key of a position at or before lo that splits presentation order: each
+   earlier video packet has a lower pts and each later one a higher pts.
+   Then its position is its video index. Without such a packet, the decode
+   starts at packet 0 and position 0. */
+static Window decode_window(const Source *s, Span keep) {
+  int64_t after = INT64_MAX; /* the lowest pts of the video packets after packet i */
+  uint64_t rank = s->frames; /* the video index of packet i */
+  for (size_t i = s->pkt_count; i-- > 0;) {
+    const AVPacket *pkt = s->pkts[i];
+    int video = pkt->stream_index == s->vs;
+    rank -= video ? 1u : 0u;
+    if (video && rank <= keep.lo && s->vpts[rank] == pkt->pts && pkt->pts < after && decode_key(s, pkt))
+      return (Window){i, rank};
+    after = video && pkt->pts < after ? pkt->pts : after;
+  }
+  return (Window){0, 0};
 }
 
 static void drop_last_comma(char *text) {
@@ -969,23 +1031,35 @@ static int filter_frame(Enc *e, AVFrame *f) {
   return drained(r);
 }
 
-/* Each kept frame gets the source timing (O-2, M4-R2, setpts=PTS-STARTPTS
-   and -fps_mode passthrough): its pts relative to the first kept frame and
-   its own duration, both in the encoder time base. Then it goes through the
-   graph of its active burns, if any. */
+/* The frame F out of the decoder must have the pts of the next position
+   (D-M5-2). Each kept frame gets the source timing (O-2, M4-R2,
+   setpts=PTS-STARTPTS and -fps_mode passthrough): its pts relative to the
+   first kept frame and its own duration, both in the encoder time base. Then
+   it goes through the graph of its active burns, if any. */
+static int video_frame(Enc *e, AVFrame *f) {
+  uint64_t p = e->position;
+  if (f->pts != e->src->vpts[p]) {
+    e->skewed = 1;
+    e->skew_pts = f->pts;
+    return AVERROR_INVALIDDATA;
+  }
+  e->position = p + 1u;
+  if (p < e->cut.keep.lo)
+    return 0;
+  uint64_t mask = mask_at(&e->cut, p);
+  f->pts = out_pts(e->src, e->cut.keep.lo, p);
+  f->duration = out_duration(e->src, f->duration);
+  f->time_base = e->venc->time_base;
+  int r = mask == e->mask ? 0 : graph_switch(e, mask);
+  return r < 0 ? r : e->graph == NULL ? video_out(e, f) : filter_frame(e, f);
+}
+
+/* The frames out of the decoder after position hi are not checked and not
+   kept. */
 static int video_frames(Enc *e) {
   int r = 0;
   while (r >= 0 && (r = avcodec_receive_frame(e->vdec, e->frame)) >= 0) {
-    uint64_t p = e->position++;
-    if (p >= e->cut.keep.lo && p <= e->cut.keep.hi) {
-      uint64_t mask = mask_at(&e->cut, p);
-      e->frame->pts = out_pts(e->src, e->cut.keep.lo, p);
-      e->frame->duration = out_duration(e->src, e->frame->duration);
-      e->frame->time_base = e->venc->time_base;
-      r = mask == e->mask ? 0 : graph_switch(e, mask);
-      if (r >= 0)
-        r = e->graph == NULL ? video_out(e, e->frame) : filter_frame(e, e->frame);
-    }
+    r = e->position > e->cut.keep.hi ? 0 : video_frame(e, e->frame);
     av_frame_unref(e->frame);
   }
   return drained(r);
@@ -1092,14 +1166,17 @@ static int audio_frames(Enc *e) {
   return drained(r);
 }
 
-/* Decodes every packet in file order, then flushes the decoders, the last
-   short audio frame and the encoders. */
+/* Decodes every audio packet and the video packets of the decode window in
+   file order, then flushes the decoders, the last short audio frame and the
+   encoders. The window sends no video packet after the decoder gives
+   position hi (D-M5-1); the audio decode stays whole (D-M5-3). */
 static int enc_run(Enc *e, const Source *s) {
   int r = 0;
   for (size_t i = 0; r >= 0 && i < s->pkt_count; i++) {
     int video = s->pkts[i]->stream_index == s->vs;
-    r = avcodec_send_packet(video ? e->vdec : e->adec, s->pkts[i]);
-    if (r >= 0)
+    int skip = video && (i < e->window.first || e->position > e->cut.keep.hi);
+    r = skip ? 0 : avcodec_send_packet(video ? e->vdec : e->adec, s->pkts[i]);
+    if (r >= 0 && !skip)
       r = video ? video_frames(e) : audio_frames(e);
   }
   if (r >= 0 && (r = avcodec_send_packet(e->vdec, NULL)) >= 0)
@@ -1137,12 +1214,17 @@ static int encode(Machine *m, const Source *s, const Cut *cut, const char *path)
   memset(&e, 0, sizeof e);
   e.cut = *cut;
   e.src = s;
+  e.window = decode_window(s, cut->keep);
+  e.position = e.window.start;
   const char *why = enc_open(&e, s, path, temporary);
-  if (why == NULL && enc_run(&e, s) < 0)
+  if (why == NULL && enc_run(&e, s) < 0 && !e.skewed)
     why = "an encode step failed";
-  if (why == NULL && av_write_trailer(e.oc) < 0)
+  if (why == NULL && !e.skewed && av_write_trailer(e.oc) < 0)
     why = "cannot write the container trailer";
-  int count_ok = why != NULL || e.position == s->frames;
+  /* The decode gave each position of [lo, hi], each with its pts (D-M5-2). */
+  int count_ok = why != NULL || (!e.skewed && e.position > cut->keep.hi);
+  int skewed = e.skewed;
+  int64_t got = e.skew_pts;
   uint64_t decoded = e.position;
   if (enc_free(&e) < 0 && why == NULL)
     why = "cannot close the output file";
@@ -1152,9 +1234,12 @@ static int encode(Machine *m, const Source *s, const Cut *cut, const char *path)
   free(temporary);
   if (why != NULL)
     return diag_fail(m->diag, "MEDIA_ENCODE", NULL, "%s: %s", path, why) + 2;
+  if (!count_ok && skewed)
+    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "position %llu: the decoded frame has pts %lld, the index has %lld",
+                     ULL(decoded), (long long)got, (long long)s->vpts[decoded]) + 1;
   if (!count_ok)
-    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "decoded %llu frames, the index has %llu",
-                     (unsigned long long)decoded, (unsigned long long)s->frames) + 1;
+    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "the decode ended before position %llu, the cut ends at %llu",
+                     ULL(decoded), ULL(cut->keep.hi)) + 1;
   return 0;
 }
 
