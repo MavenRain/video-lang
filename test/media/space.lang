@@ -17,3 +17,9 @@ def chain : Video -> Video := compose half (compose boxF cutF)
 def chainR : Video -> Video := compose (compose half boxF) cutF
 def wide : Video -> Video := fun (v : Video) => crop (rect 200 0 160 120) v
 def shift : Video -> Video := fun (v : Video) => pad (padSpec 320 240 10 0 0) v
+def vsmall : Video -> Video := fun (v : Video) => scale (res 160 120) (trim (interval 20 40) v)
+def vbox : Video -> Video := fun (v : Video) => crop (rect 40 20 160 120) (trim (interval 20 40) v)
+def vframe : Video -> Video := fun (v : Video) => pad (padSpec 400 300 40 30 1056816) (trim (interval 20 40) v)
+def vscaleCut : Video -> Video := fun (v : Video) => trim (interval 20 40) (scale (res 160 120) v)
+def vcropCut : Video -> Video := fun (v : Video) => trim (interval 20 40) (crop (rect 40 20 160 120) v)
+def vpadCut : Video -> Video := fun (v : Video) => trim (interval 20 40) (pad (padSpec 400 300 40 30 1056816) v)

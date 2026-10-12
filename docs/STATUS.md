@@ -1,7 +1,8 @@
 # video-lang status
 
-The build implements the milestones K0, M1, M2 and M3 of `SPEC.md`
-section 10. M3 is the documentation and the 1080p performance checks. The
+The build implements the milestones K0, M1, M2, M3 and M4 of `SPEC.md`
+section 10. M4 accepts variable frame rate sources and keeps their timing.
+M3 is the documentation and the 1080p performance checks. The
 milestone wide mutant sweep is not in the M3 scope (ruling M3-R1). No other
 milestone is open.
 
@@ -15,13 +16,15 @@ milestone is open.
 - The domain definitions `Filter`, `idFilter`, `compose` and
   `SubtitleTrack` (`domain/video.lang`).
 - The verbs `check`, `eval`, `build` (JSON and media) and `ffmpeg`.
-- R1 on 25 media programs in `make check`, and on 6 runs at 1920x1080 in
+- Constant and variable frame rate video, with source timing relative to
+  the first kept frame and `-fps_mode passthrough` (M4-R1, M4-R2).
+- R1 on 40 media programs in `make check`, and on 6 runs at 1920x1080 in
   `make perf`.
 - The status of each type former (F1 to F15) is in `formers/tcc-media.md`.
 
 ## Remaining work
 
-1. None in the scope of K0 to M3. A new milestone needs a USER ruling
+1. None in the scope of K0 to M4. A new milestone needs a USER ruling
    first.
 
 ## Known limits
@@ -30,7 +33,9 @@ milestone is open.
   (`src/media.c:32`, `:34`).
 - All the `burnText` steps together hold at most 64 text entries, because
   the in-process text mask is one 64 bit word (`src/media.c:33`).
-- The host refuses an input without a constant frame rate (`VFR_SOURCE`).
+- The host refuses video without a positive frame rate or a pts for each
+  frame, duplicate source pts, and kept frames that round to one output
+  pts (`MEDIA_TIMESTAMPS`).
 - The design law "scale is a functor" is false on pixels. Thus the compiler
   does not rewrite a program by this law.
 - R1 compares decoded frames. It does not compare container bytes.

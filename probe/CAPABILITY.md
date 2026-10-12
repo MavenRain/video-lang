@@ -56,6 +56,8 @@ the pin.
 | P14 | Two text entries on the same frames draw in list order. |
 | P15 | A space and the UTF-8 text `café €5` give equal frames in process and in ffmpeg. |
 | P16 | The escaped `text=` value gives the same frames as `textfile=` with the raw bytes. |
+| P17 | VFR source (ffmpeg-full 9.0.2; vfr2 = 25 fps, then 12.5 fps from position 30; stream tb 1/12800). `-fps_mode passthrough` gives the same framemd5 as no flag on vfr2 (trim 20:40, whole, scale) and on the CFR cases whole, small, vonly, tail and pick: the plain mp4 output does not duplicate or drop a frame. The output video tb is 1/fr (fr = r_frame_rate), not the stream tb: `#tb 1/25` for vfr2 and vfr3 (stream tb 1/90000), `#tb 6/149` for vfr5. The mp4 timescale is the rate numerator doubled until it is 10000 or more (12800, 19072). Each kept frame has pts = its source pts minus the pts of the first kept frame, in ticks of 1/fr: trim 20:40 gives 0 1 2 ... 9 11 13 ... 29. The last frame keeps its own packet duration (trim 20:31 ends on the first 12.5 fps frame with duration 1; trims that end at position 40 and the whole video end with 2). Other durations are the dts steps of the output. |
+| P17b | Rounding to 1/fr is to the nearest tick, not down: on vfr5 (the 12.5 fps part 13 ms late, r 149/6) position 21 is 0.993 tick after position 20 and gets pts 1. fftools adds 1/2^17 to a value that is not an integer, so a tie goes up. Two frames that round to one pts (vfrc: positions 29 and 30 are 4 ms apart at fr 25): the CLI exits 0, libx264 prints "non-strictly-monotonic PTS" and the muxer moves a dts ("This may result in incorrect timestamps"). We refuse that cut with `MEDIA_TIMESTAMPS`. |
 | B1 | `expansion=normal` with `%{n}`: the frame number is relative, so trim and text do not commute. |
 | B2 | `expansion=normal` with `100%`: ffmpeg stops with "Stray %", exit 234. |
 | B3 | `fontfile=` names a missing file: ffmpeg exits 0 and uses fontconfig. |
@@ -72,7 +74,7 @@ the pin.
 | --- | --- | --- |
 | Check | `build/langc check PROG` | Exit 0, or exit 1 and a refusal code (gate rows: parse 17, check 31) |
 | Print normal form | `build/langc eval PROG NAME [ARGS...]` | The value, or `trap` (gate row: evals 29) |
-| Build | `build/langc build PROG MAIN IN... -o OUT` | A media file that the host makes in process with libav* (gate row: media R1 25) |
+| Build | `build/langc build PROG MAIN IN... -o OUT` | A media file that the host makes in process with libav* (gate row: media R1 40) |
 | Run | `build/langc ffmpeg PROG MAIN IN... -o OUT` | The ffmpeg command for the same program. The gate runs it as the reference for R1. |
 
 - `build/langc build PROG [-o OUT]` writes the JSON document (gate row:
@@ -119,15 +121,21 @@ refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
 
 `langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
 process (libavfilter graphs and `sws_scale`) and encodes OUT with the
-default encoders of the container (`src/media.c:694`; libx264 and aac for
+default encoders of the container (`src/media.c:729`; libx264 and aac for
 .mp4). It writes a temporary file and renames it to OUT only when the build
-succeeds (`src/media.c:1057`). R1 compares the decoded frames of OUT with
+succeeds (`src/media.c:1137`). R1 compares the decoded frames of OUT with
 the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
-(`fm`, `test/gate.sh:158`). R1 does not compare the file bytes. Evidence:
-media R1 25 rows, P4, P8. An input must have yuv420p video
-(`MEDIA_FORMAT`, `src/media.c:367`) and a constant frame rate
-(`VFR_SOURCE`, `src/media.c:337`). Audio is optional; when present, it
-must be fltp with a positive sample rate (`src/media.c:368`).
+(`fm`, `test/gate.sh:162`). R1 does not compare the file bytes. Evidence:
+media R1 40 rows, P4, P8, P17 and P17b. An input must have yuv420p video
+(`MEDIA_FORMAT`, `src/media.c:377`). Constant and variable frame rate video
+is accepted (M4-R1). Pts keep source timing relative to the first kept
+frame, rounded to `1/fr`; the last frame keeps its own duration (M4-R2).
+Missing video pts, duplicate source pts, no positive rate, and kept pts
+that collide after rounding are `MEDIA_TIMESTAMPS` refusals
+(`src/media.c:339`, `:623`). The reference uses `-fps_mode passthrough`.
+Audio is optional; when present, it must be fltp with a positive sample
+rate (`src/media.c:382`). Its pts keep gaps relative to the first kept
+sample, as the C media IO cases verify on mp4 and Matroska sources.
 
 ## 6. Cost
 

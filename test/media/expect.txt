@@ -23,3 +23,18 @@ clipped 50 text.lang clipped av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 outside 20 text.lang outside av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 blank 50 text.lang blank av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 vtext 20 text.lang late v.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+vwhole 52 cut.lang whole vfr2.mp4
+vacross 21 cut.lang across vfr2.mp4
+vedge 11 cut.lang edge vfr2.mp4
+vinside 22 cut.lang tail vfr2.mp4
+vnested 10 cut.lang nested vfr2.mp4
+vnestx 16 cut.lang nestAcross vfr2.mp4
+vscale 21 space.lang vsmall vfr2.mp4
+vcrop 21 space.lang vbox vfr2.mp4
+vpad 21 space.lang vframe vfr2.mp4
+vbig 52 space.lang big vfr2.mp4
+vburn 21 text.lang vlate vfr2.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+vnoaudio 49 cut.lang whole vfr.mp4
+vmain 20 cut.lang main vfr.mp4
+vround 21 cut.lang across vfr5.mp4
+vroundw 52 cut.lang whole vfr5.mp4

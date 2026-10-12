@@ -9,7 +9,7 @@ executable: `build/langc`. The source files are the same as at commit
 
 `make check FFMPEG_PREFIX=/opt/homebrew/opt/ffmpeg-full` passes with zero
 failures. It builds `build/langc` and the C test programs with TinyCC, and
-`make check-clang` gives no warnings. It runs 289 cases:
+`make check-clang` gives no warnings. It runs 333 cases:
 
 | Group | Cases | Source |
 |---|---|---|
@@ -19,20 +19,23 @@ failures. It builds `build/langc` and the C test programs with TinyCC, and
 | evaluations | 29 | `test/gate.sh` |
 | JSON goldens | 11 | `test/gate.sh`, `test/json` |
 | build refusals | 2 | `test/gate.sh`, `test/emit` |
-| media R1 | 25 | `test/gate.sh`, `test/media`, `test/ffmpeg` |
-| media laws | 16 | `test/gate.sh`, `test/media/laws.txt` |
+| media R1 | 40 | `test/gate.sh`, `test/media`, `test/ffmpeg` |
+| media laws | 24 | `test/gate.sh`, `test/media/laws.txt` |
 | media refusals | 21 | `test/gate.sh`, `test/media/refuse.txt` |
 | regressions | 6 | `test/regressions.js` |
 | printer | 2 | `test/printer-regressions.js` |
 | media regressions | 52 | `test/mediatool.c` |
-| media IO | 59 | `test/mediareview.c` |
+| media IO | 80 | `test/mediareview.c` |
 | perf comparator | 7 | `test/mediaperfcheck.c` |
 
 A media R1 case runs `langc build` and the `langc ffmpeg` command on the
 same program and inputs. Then it compares the framemd5 of all the streams
 and the frame count. The gate makes its inputs at run time with ffmpeg
 (`testsrc2` 320x240 at 25 fps, with and without a 440 Hz `sine` track, and
-one variable frame rate input).
+variable frame rate inputs with dropped frames, a rate change with audio,
+off-grid pts, and a collision after rounding). The C media IO cases also
+compare VFR outputs with continuous and gapped audio in mp4 and Matroska
+sources, including whole, trim, nested trim and scale.
 
 ## Performance at 1920x1080
 

@@ -1,0 +1,1 @@
+ffmpeg -i vfr2.mp4 -vf trim=start_frame=20:end_frame=41,setpts=PTS-STARTPTS,trim=start_frame=5:end_frame=21,setpts=PTS-STARTPTS -af atrim=start_sample=35280:end_sample=93492,asetpts=PTS-STARTPTS,atrim=start_sample=8820:end_sample=58212,asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

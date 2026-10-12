@@ -14,3 +14,11 @@ exact text.lang blank plain av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 exact text.lang pairTrack twoSteps av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 exact text.lang apart apartR av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 shape text.lang scaleText textScale av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+exact cut.lang idemAcross across vfr2.mp4
+exact cut.lang nestAcross capAcross vfr2.mp4
+exact cut.lang nested capped vfr2.mp4
+exact cut.lang idem main vfr.mp4
+exact space.lang vscaleCut vsmall vfr2.mp4
+exact space.lang vcropCut vbox vfr2.mp4
+exact space.lang vpadCut vframe vfr2.mp4
+exact cut.lang nestAcross capAcross vfr5.mp4

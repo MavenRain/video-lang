@@ -53,12 +53,18 @@ order of the parameters: an mp4 file for a `Video`, a TrueType file for a
 The host evaluates the entry to a plan of steps: `trim`, `scale`, `crop`,
 `pad` and `burnText`. A `trim` also cuts the audio. Then the host decodes
 the input, applies each step and encodes the result with libx264 and aac,
-with the options of the ffmpeg CLI. The audio stream is optional. The host
-refuses an input without a constant frame rate (`VFR_SOURCE`).
+with the options of the ffmpeg CLI. The audio stream is optional. Constant
+and variable frame rate sources are accepted. Video pts keep the source
+timing relative to the first kept frame, rounded to the encoder time base
+`1/fr` (M4-R2). The last frame keeps its own duration. Audio pts keep gaps
+relative to the first kept audio sample. The host refuses missing video
+pts, duplicate pts, no positive rate, or kept pts that collide after
+rounding (`MEDIA_TIMESTAMPS`).
 
 `langc ffmpeg` prints one ffmpeg command for the same plan: a `-vf` chain
 of `trim`, `scale`, `crop`, `pad` and `drawtext` filters, and a `-af`
-chain. The gate runs this command with the ffmpeg of `FFMPEG_PREFIX`. Then
+chain, with `-fps_mode passthrough`. The gate runs this command with the
+ffmpeg of `FFMPEG_PREFIX`. Then
 it compares the decoded frames of the two outputs with framemd5 over all
 the streams (ruling R1). `SPEC.md` section 7 lists the media refusal codes.
 

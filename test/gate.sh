@@ -150,17 +150,28 @@ build/langc build examples/formers.lang -x 2>/dev/null >/dev/null || status=$?
 
 # Media (video-lang K0). The pin makes the fixtures at each run; they are never
 # committed: av.mp4 (video and audio), v.mp4 (no audio), vfr.mp4 (one dropped
-# frame, so no constant frame rate).
+# frame, no audio), vfr2.mp4 (25 fps, then 12.5 fps from position 30, with
+# audio), vfr5.mp4 (vfr2 with the 12.5 fps part 13 ms late, so the pts are off
+# the 1/fr grid) and vfrc.mp4 (positions 29 and 30 are 4 ms apart, so they
+# round to one output pts: MEDIA_TIMESTAMPS).
 kit=$(pwd)
 media="$tmp/media"
 mkdir -p "$media"
 ff() { "$FFMPEG" -nostdin -loglevel error -y "$@"; }
 fm() { "$FFMPEG" -nostdin -loglevel error -i "$1" -map 0 -f framemd5 -; }
 src=testsrc2=size=320x240:rate=25:duration=2
+vsrc=testsrc2=size=320x240:rate=25:duration=3
 (cd "$media" &&
   ff -f lavfi -i "$src" -f lavfi -i sine=frequency=440:duration=2 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest av.mp4 &&
   ff -f lavfi -i "$src" -c:v libx264 -pix_fmt yuv420p v.mp4 &&
-  ff -f lavfi -i "$src" -vf "select='not(eq(n,5))'" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p vfr.mp4) \
+  ff -f lavfi -i "$src" -vf "select='not(eq(n,5))'" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p vfr.mp4 &&
+  ff -f lavfi -i "$vsrc" -f lavfi -i sine=frequency=440:duration=3 -vf "select='lt(n,30)+mod(n,2)'" \
+    -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest vfr2.mp4 &&
+  ff -f lavfi -i "$vsrc" -f lavfi -i sine=frequency=440:duration=3 \
+    -vf "select='lt(n,30)+mod(n,2)',settb=1/90000,setpts='PTS+if(gte(N,30),0.013/TB,0)'" -fps_mode passthrough \
+    -enc_time_base:v 1/90000 -video_track_timescale 90000 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest vfr5.mp4 &&
+  ff -f lavfi -i "$src" -vf "settb=1/90000,setpts='if(eq(N,30),PTS-0.036/TB,PTS)'" -fps_mode passthrough \
+    -enc_time_base:v 1/90000 -video_track_timescale 90000 -c:v libx264 -pix_fmt yuv420p vfrc.mp4) \
   || { echo "FAIL media: the pin did not make the fixtures"; fail=$((fail + 1)); }
 # The text rows bind the gate font (M2-R2); it is never committed.
 font=/System/Library/Fonts/Supplemental/Arial.ttf

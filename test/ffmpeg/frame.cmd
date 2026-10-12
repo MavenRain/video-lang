@@ -1,1 +1,1 @@
-ffmpeg -i av.mp4 -vf trim=start_frame=10:end_frame=30,setpts=PTS-STARTPTS,pad=400:300:40:30:color=0x102030 -af atrim=start_sample=17640:end_sample=52920,asetpts=PTS-STARTPTS ref.mp4
+ffmpeg -i av.mp4 -vf trim=start_frame=10:end_frame=30,setpts=PTS-STARTPTS,pad=400:300:40:30:color=0x102030 -af atrim=start_sample=17640:end_sample=52920,asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

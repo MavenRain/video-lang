@@ -1,1 +1,1 @@
-ffmpeg -i av.mp4 -vf 'drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=café\\ €5:expansion=none:fontsize=24:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,0,49)'\'',setpts=PTS-STARTPTS' -af asetpts=PTS-STARTPTS ref.mp4
+ffmpeg -i av.mp4 -vf 'drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=café\\ €5:expansion=none:fontsize=24:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,0,49)'\'',setpts=PTS-STARTPTS' -af asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

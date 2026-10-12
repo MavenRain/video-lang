@@ -66,9 +66,14 @@ this repository.
   (`src/json.h:15`).
 - `langc build PROG MAIN IN... -o OUT` writes a media file. It writes a
   temporary file first and renames it to OUT only when the build succeeds
-  (`src/media.c:1057`). The encoders are the defaults of the container
-  (`src/media.c:694`).
+  (`src/media.c:1137`). The encoders are the defaults of the container
+  (`src/media.c:729`). Constant and variable frame rate video is accepted.
+  Pts keep source timing relative to the first kept frame, rounded to
+  `1/fr`; the last frame keeps its own duration. Audio keeps timestamp
+  gaps relative to the first kept sample. Missing video pts, duplicate
+  pts, no positive rate, and kept pts that collide after rounding are
+  `MEDIA_TIMESTAMPS` refusals (`src/media.c:339`, `:623`).
 - `langc ffmpeg PROG MAIN IN... -o OUT` prints the ffmpeg command for the
-  same program, and that command writes OUT (`test/gate.sh:179`). The
-  decoded frames of the two outputs are equal in all 25 media R1 gate
-  cases, over all streams.
+  same program with `-fps_mode passthrough`, and that command writes OUT
+  (`src/media.c:680`). The decoded frames of the two outputs are equal in
+  all 40 media R1 gate cases, over all streams.

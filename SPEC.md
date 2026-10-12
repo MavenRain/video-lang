@@ -150,10 +150,12 @@ only), the composition of two resolutions (D1), an encode specification
 over one input. It runs the steps in process with the FFmpeg libraries and
 encodes with the default encoders of the container, libx264 and aac for
 `.mp4` (O-5). It writes a temporary file and renames it to OUT only when
-the encode succeeds (`src/media.c:1028`, `:1057`). Positions start again
-from 0 at encode (O-2). An output with no frame is a refusal, and no file is
-written (D3). `langc ffmpeg` prints `ffmpeg -i IN -vf VF [-af AF] OUT` for
-the same program (`src/media.c:644-662`). The proofs and the types erase:
+the encode succeeds (`src/media.c:1108`, `:1137`). Positions start again
+from 0 at encode (O-2). The video keeps the source timing relative to its
+first kept frame, rounded to the encoder time base (M4-R2). An output with
+no frame is a refusal, and no file is written (D3). `langc ffmpeg` prints
+`ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT` for the same
+program (`src/media.c:680`). The proofs and the types erase:
 only the steps reach the output.
 
 The build refuses with these codes (`src/media.c`):
@@ -168,7 +170,7 @@ The build refuses with these codes (`src/media.c`):
 | `INTERVAL_ORDER` | A trim interval with `lo > hi` |
 | `MEDIA_INPUT`, `MEDIA_NO_VIDEO` | An input does not open, or has no video stream |
 | `MEDIA_FORMAT` | The video is not yuv420p, or the audio is not fltp with a positive rate |
-| `VFR_SOURCE` | The input has no constant frame rate (O-2) |
+| `MEDIA_TIMESTAMPS` | A video frame has no pts, two video frames have the same pts, the video has no positive frame rate, or two kept frames round to one output pts (O-2) |
 | `EMPTY_VIDEO` | No frame to encode (D3) |
 | `MEDIA_FONT` | FreeType cannot open a `Font` input |
 | `CROP_RANGE`, `PAD_RANGE` | The crop window is outside the frame, or the pad frame does not hold the frame |
@@ -228,6 +230,12 @@ because the compiler refuses `axiom` (section 10 of the probe).
   cost, and the mutant sweep is not part of M3; make rules generate the
   1080p clips; the peak memory is the maximum resident set size;
   `design/DESIGN.md` keeps " - " in place of its 4 long dashes.
+- M4-R1. RULED 2026-10-11 (USER): accept variable frame rate sources.
+  Positions stay absolute frame ranks (D2). There is no new core operation;
+  a frame rate operation is outside the scope.
+- M4-R2. RULED 2026-10-11 (USER): keep the source timing relative to the
+  first kept frame. The reference uses `-fps_mode passthrough`, with one
+  output frame for each kept position. R1 still compares pts and duration.
 - D1. Probe-forced (P3): the compiler never rewrites a program by a law
   that is false on pixels. Exact laws: trim twice, trim by an intersection,
   and each operation with trim. Laws on the frame shape only: scale
@@ -239,9 +247,16 @@ because the compiler refuses `axiom` (section 10 of the probe).
 - O-1. Default: a program takes `Video` parameters, and the command line
   binds the files. A program contains no file path. Encode is the boundary
   of the `build` command.
-- O-2. Default: positions start again from 0 at encode (`setpts` and
-  `asetpts`). The gate compares the full framemd5 line. Constant frame rate
-  only. A variable frame rate input is a refusal (`VFR_SOURCE`).
+- O-2. Revised by M4-R1 and M4-R2: accept constant and variable frame rate
+  sources. Video pts start at 0 (`setpts=PTS-STARTPTS`) and keep the source
+  intervals. The encoder time base is `1/fr`, where `fr` is the source rate
+  from `av_guess_frame_rate`. Pts round to the nearest tick, with ties up
+  (P17b); the last frame keeps its own duration in those ticks (P17).
+  Audio pts start at 0 (`asetpts=PTS-STARTPTS`) and keep timestamp gaps.
+  The reference uses `-fps_mode passthrough`. A video without a positive
+  rate, a frame without pts, duplicate source pts, or two kept frames that
+  round to one output pts is a refusal (`MEDIA_TIMESTAMPS`). The gate
+  compares the full framemd5 line over all streams.
 - O-3. Default: in memory, a `Video` is the demuxed (compressed) packets
   and the position index. The decoded frames go through the operations one
   at a time at encode. Reason: one decoded 1080p frame is 3.1 MB, so a full
@@ -263,8 +278,9 @@ because the compiler refuses `axiom` (section 10 of the probe).
 | M1 | This repository from the kit; `domain/video.lang`; `scale`, `crop`, `pad`, `compose`, `idFilter`, `intersect`; the D1 exact laws; the refusals |
 | M2 | `burnText` with `Text`, `Font`, `Style` and `SubtitleTrack`, against ffmpeg-full `drawtext` |
 | M3 | Hardening: the docs, and the cost at 1080p below 4 GB (ruling M3-R1) |
+| M4 | Variable frame rate sources; source timing with `-fps_mode passthrough`; VFR R1 cases, exact laws and timestamp refusals (M4-R1, M4-R2) |
 
-Status 2026-10-10: K0, M1, M2 and M3 are DONE. M3 Steps 1 to 4 are DONE.
+Status 2026-10-11: K0, M1, M2, M3 and M4 are DONE. M3 Steps 1 to 4 are DONE.
 Step 1 is `make perf`. Step 2 is the host docs. Step 3 is this file and
 `formers/`. Step 4 is `README.md`, `docs/host/README.md`, `docs/STATUS.md`
 and `docs/VALIDATION.md`. No milestone is open. A new milestone needs a new

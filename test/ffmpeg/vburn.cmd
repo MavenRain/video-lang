@@ -1,0 +1,1 @@
+ffmpeg -i vfr2.mp4 -vf 'trim=start_frame=20:end_frame=41,setpts=PTS-STARTPTS,drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=Hi:expansion=none:fontsize=32:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,8,13)'\''' -af atrim=start_sample=35280:end_sample=93492,asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

@@ -8,3 +8,8 @@ def pickB : Video -> Video -> Video := fun (a : Video) => fun (b : Video) => tri
 def empty : Video -> Video := fun (v : Video) => trim (interval 60 70) v
 def disjoint : Video -> Video := fun (v : Video) => trim (interval 40 45) (trim (interval 10 29) v)
 def answer : Nat := 3
+def across : Video -> Video := fun (v : Video) => trim (interval 20 40) v
+def edge : Video -> Video := fun (v : Video) => trim (interval 20 30) v
+def nestAcross : Video -> Video := fun (v : Video) => trim (interval 25 45) (trim (interval 20 40) v)
+def capAcross : Video -> Video := fun (v : Video) => trim (interval 25 40) v
+def idemAcross : Video -> Video := fun (v : Video) => trim (interval 20 40) (trim (interval 20 40) v)

@@ -61,6 +61,68 @@ static int frame_hashes(const char *ffmpeg, const char *input, const char *outpu
     "-map", "0", "-f", "framemd5", (char *)output, NULL};
   return child(argv) == 0;
 }
+
+/* VFR sources can have audio timestamp gaps. The sample cut is still
+   atrim by sample count, but asetpts must keep each sample's timing.
+   Matroska's 1 ms clock must not create gaps in continuous audio. */
+static void vfr_audio_cases(const char *ffmpeg, const char *dir) {
+  Arena arena;
+  Diag diag;
+  Machine m;
+  DeclList decls;
+  const char *program =
+    "def whole : Video -> Video := fun (v : Video) => v\n"
+    "def cut : Video -> Video := fun (v : Video) => trim (interval 10 25) v\n"
+    "def nested : Video -> Video := fun (v : Video) => trim (interval 12 25) (trim (interval 10 29) v)\n"
+    "def small : Video -> Video := fun (v : Video) => scale (res 80 60) (trim (interval 10 25) v)\n";
+  const char *entries[] = {"whole", "cut", "nested", "small"};
+  const char *containers[] = {"mp4", "mkv"};
+  arena_init(&arena, (size_t)64 << 20);
+  diag_init(&diag);
+  int loaded = front_load(&arena, "vfr-audio.lang", program, strlen(program), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  char input[1200], ours[1200], ref[1200], oh[1200], rh[1200];
+  snprintf(ours, sizeof ours, "%s/vfr-ours.mp4", dir);
+  snprintf(ref, sizeof ref, "%s/vfr-ref.mp4", dir);
+  snprintf(oh, sizeof oh, "%s/vfr-ours.md5", dir);
+  snprintf(rh, sizeof rh, "%s/vfr-ref.md5", dir);
+  for (unsigned gap = 0; gap < 2; gap++) {
+    for (unsigned container = 0; container < 2; container++) {
+      snprintf(input, sizeof input, "%s/vfr-audio.%s", dir, containers[container]);
+      char *args[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-f", "lavfi", "-i",
+        "testsrc2=size=160x120:rate=25:duration=2", "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+        "-vf", "select='lt(n,15)+mod(n,2)'", "-af", gap ? "aselect='not(between(t,0.5,0.75))'" : "anull",
+        "-fps_mode", "passthrough", "-enc_time_base:v", "1/90000", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", input, NULL};
+      int made = loaded && child(args) == 0;
+      for (unsigned entry = 0; entry < sizeof entries / sizeof entries[0]; entry++) {
+        char *inputs[] = {input};
+        FILE *command = tmpfile();
+        diag_init(&diag);
+        int ok = made && command != NULL && media_build(&m, entries[entry], inputs, 1, ours) == 0
+          && media_ffmpeg(&m, entries[entry], inputs, 1, ref, command) == 0;
+        if (ok) {
+          char line[8192];
+          rewind(command);
+          size_t n = fread(line, 1, sizeof line - 1u, command);
+          line[n] = '\0';
+          char *argv[] = {"sh", "-c", line, NULL};
+          ok = !ferror(command) && n < sizeof line - 1u && child(argv) == 0
+            && frame_hashes(ffmpeg, ours, oh) && frame_hashes(ffmpeg, ref, rh) && same_file(oh, rh);
+        }
+        if (command != NULL) fclose(command);
+        char name[128];
+        snprintf(name, sizeof name, "VFR %s %s audio %s equals ffmpeg", containers[container],
+                 gap ? "gapped" : "continuous", entries[entry]);
+        expect(name, ok);
+        remove(ours); remove(ref); remove(oh); remove(rh);
+      }
+      remove(input);
+    }
+  }
+  arena_release(&arena);
+}
+
 static void text_escape_cases(const char *dir) {
   static const char *texts[] = {" leading", "trailing ", "  ", "", "  a:b,c'd\\e%f[g];h=i \"j\"  "};
   const char *font = "/System/Library/Fonts/Supplemental/Arial.ttf";
@@ -386,6 +448,67 @@ static void mask_cases(void) {
   expect("chain_of with no spatial step", chain_of(&bare, 3, out) && strcmp(out, "A,B") == 0
     && chain_of(&bare, 0, out) && strcmp(out, "") == 0);
 }
+
+/* index_positions on COUNT video packets with the pts PTS at 25 fps: 1
+   (accepted), 0 (refused, the code is in m->diag) or -1 (no memory). */
+static int indexed(Machine *m, const int64_t *pts, size_t count) {
+  AVPacket *pkts[4] = {NULL, NULL, NULL, NULL};
+  Source s;
+  memset(&s, 0, sizeof s);
+  s.as = -1;
+  s.fr = (AVRational){25, 1};
+  s.pkts = pkts;
+  s.pkt_count = count;
+  s.frames = count;
+  int ok = count <= 4u;
+  for (size_t i = 0; ok && i < count; i++) {
+    pkts[i] = av_packet_alloc();
+    ok = pkts[i] != NULL;
+    if (ok)
+      pkts[i]->pts = pts[i];
+  }
+  diag_init(m->diag);
+  ok = ok ? index_positions(m, "t.mp4", &s) : -1;
+  av_freep(&s.vpts);
+  for (size_t i = 0; i < count; i++)
+    av_packet_free(&pkts[i]);
+  return ok;
+}
+
+/* The M4 timing rules (O-2, M4-R1, M4-R2). out_pts: vpts[p] - vpts[lo] to
+   the nearest tick of 1/fr, a tie up (fftools adds 1/2^17 off an integer).
+   The tick at 25 fps is 3600 in 1/90000: 3564 is 0.99 tick, 9000 is 2.5 and
+   12600 is 3.5. out_duration: a stream duration in ticks. index_positions
+   accepts a VFR index and refuses a frame without a pts and two frames at
+   one pts (no lavfi fixture makes these). */
+static void timing_cases(Machine *m) {
+  static const int64_t VFR[] = {0, 512, 1536};
+  static const int64_t NOPTS[] = {0, AV_NOPTS_VALUE, 1024};
+  static const int64_t SAME[] = {0, 512, 512};
+  int64_t vpts[] = {0, 3564, 9000, 12600};
+  AVFormatContext *fmt = avformat_alloc_context();
+  AVStream *st = fmt == NULL ? NULL : avformat_new_stream(fmt, NULL);
+  Source s;
+  memset(&s, 0, sizeof s);
+  s.fmt = fmt;
+  s.as = -1;
+  s.vpts = vpts;
+  s.frames = 4;
+  s.fr = (AVRational){25, 1};
+  if (st != NULL)
+    st->time_base = (AVRational){1, 90000};
+  expect("out_pts rounds to the nearest tick of 1/fr, a tie up", st != NULL && out_pts(&s, 0, 0) == 0
+    && out_pts(&s, 0, 1) == 1 && out_pts(&s, 0, 2) == 3 && out_pts(&s, 0, 3) == 4 && out_pts(&s, 1, 2) == 2
+    && out_pts(&s, 1, 3) == 3);
+  expect("out_duration is the stream duration in ticks of 1/fr", st != NULL && out_duration(&s, 3600) == 1
+    && out_duration(&s, 7200) == 2);
+  avformat_free_context(fmt);
+  expect("a VFR index is accepted", indexed(m, VFR, 3) == 1);
+  int nopts = indexed(m, NOPTS, 3) == 0 && m->diag->code != NULL && strcmp(m->diag->code, "MEDIA_TIMESTAMPS") == 0;
+  expect("a frame without a pts is MEDIA_TIMESTAMPS", nopts);
+  int same = indexed(m, SAME, 3) == 0 && m->diag->code != NULL && strcmp(m->diag->code, "MEDIA_TIMESTAMPS") == 0;
+  expect("two frames at one pts is MEDIA_TIMESTAMPS", same);
+}
 int main(void) {
   const char *ffmpeg = getenv("FFMPEG");
   if (ffmpeg == NULL) ffmpeg = "ffmpeg";
@@ -468,11 +591,13 @@ int main(void) {
   source_close(&src);
   arena_release(&arena);
   spatial_sar_cases(ffmpeg, dir);
+  vfr_audio_cases(ffmpeg, dir);
   text_escape_cases(dir);
   plan_cases(input);
   escaper_cases();
   window_cases(input);
   mask_cases();
+  timing_cases(&m);
   remove(input); remove(fractional); remove(saved); rmdir(dir);
   printf("media IO regressions: %u checked, %u failures\n", checked, failed);
   return failed != 0;

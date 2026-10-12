@@ -1,1 +1,1 @@
-ffmpeg -i av.mp4 -vf 'drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=a\\:b\,c\\\'\''d\\\\e%f\[g\]\;h=i\\ "j"\\ 100%:expansion=none:fontsize=32:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,0,49)'\'',setpts=PTS-STARTPTS' -af asetpts=PTS-STARTPTS ref.mp4
+ffmpeg -i av.mp4 -vf 'drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=a\\:b\,c\\\'\''d\\\\e%f\[g\]\;h=i\\ "j"\\ 100%:expansion=none:fontsize=32:fontcolor=0xffffff:x=10:y=20:enable='\''between(n,0,49)'\'',setpts=PTS-STARTPTS' -af asetpts=PTS-STARTPTS -fps_mode passthrough ref.mp4

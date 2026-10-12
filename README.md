@@ -82,7 +82,7 @@ drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=Hi:expansion
 For each program and input, the output of `langc build` and the output of
 the `langc ffmpeg` command have equal decoded frames. The check is the
 framemd5 of all the streams, video and audio, and the frame count. The
-container bytes are not compared. `make check` checks R1 on 25 media
+container bytes are not compared. `make check` checks R1 on 40 media
 programs. `make perf` checks R1 on 6 runs at 1920x1080, up to 60 seconds.
 
 ## Files

@@ -11,6 +11,7 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#include <math.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,6 +25,7 @@
 #include <libavfilter/buffersrc.h>
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
+#include <libavutil/fifo.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
@@ -112,6 +114,11 @@ typedef struct {
 } Cut;
 
 typedef struct {
+  int64_t pts;
+  int samples;
+} AudioSpan;
+
+typedef struct {
   AVFormatContext *oc;
   AVCodecContext *vdec;
   AVCodecContext *adec;
@@ -123,13 +130,18 @@ typedef struct {
   AVFrame *frame;
   AVFrame *chunk;
   AVAudioFifo *fifo;
+  AVFifo *audio_times;
   AVFilterGraph *graph; /* NULL: the chain of MASK is empty */
   AVFilterContext *bsrc;
   AVFilterContext *bsink;
   AVFrame *filtered;
   uint64_t position; /* the next video position out of the decoder */
   int64_t seen;      /* audio samples out of the decoder */
-  int64_t apts;      /* audio samples sent to the encoder */
+  int64_t apts;      /* the next sample pts in the current audio span */
+  int64_t aorigin;   /* the pts of the first kept audio sample */
+  int64_t adelta;    /* sample clock for coarse container timestamps */
+  int astarted;
+  int aremaining;
   uint64_t mask;     /* the burns of the live graph */
   const Source *src;
   Cut cut;
@@ -320,10 +332,11 @@ static int keep_packet(Source *s, AVPacket *pkt) {
   return 1;
 }
 
-/* The position index: the video pts in presentation order (D2). A source is
-   accepted only at a constant frame rate (O-2). */
+/* The position index: the video pts in presentation order (D2). The frame
+   rate can change in the stream (M4-R1), but each frame needs a pts, two
+   frames never share one, and the video needs a frame rate for the encoder
+   time base 1/fr (O-2). */
 static int index_positions(Machine *m, const char *path, Source *s) {
-  AVStream *vst = s->fmt->streams[s->vs];
   uint64_t k = 0;
   s->vpts = av_malloc_array((size_t)s->frames, sizeof *s->vpts);
   if (s->vpts == NULL)
@@ -333,17 +346,14 @@ static int index_positions(Machine *m, const char *path, Source *s) {
       s->vpts[k++] = s->pkts[i]->pts;
   }
   qsort(s->vpts, (size_t)s->frames, sizeof *s->vpts, cmp_pts);
-  if (s->fr.num <= 0 || s->fr.den <= 0 || s->vpts[0] == AV_NOPTS_VALUE)
-    return diag_fail(m->diag, "VFR_SOURCE", NULL, "%s: the video has no constant frame rate", path);
+  if (s->fr.num <= 0 || s->fr.den <= 0)
+    return diag_fail(m->diag, "MEDIA_TIMESTAMPS", NULL, "%s: the video has no frame rate", path);
+  if (s->vpts[0] == AV_NOPTS_VALUE)
+    return diag_fail(m->diag, "MEDIA_TIMESTAMPS", NULL, "%s: a video frame has no pts", path);
   for (uint64_t p = 1; p < s->frames; p++) {
-    /* CFR timestamps can round to alternating tick lengths. Compare each
-       position with its rational offset, allowing one tick for rounding. */
-    int64_t want = av_rescale_q((int64_t)p, av_inv_q(s->fr), vst->time_base);
-    uint64_t delta = (uint64_t)s->vpts[p] - (uint64_t)s->vpts[0];
-    if (s->vpts[p] <= s->vpts[p - 1u] || want <= 0
-        || delta < (uint64_t)want - 1u || delta > (uint64_t)want + 1u)
-      return diag_fail(m->diag, "VFR_SOURCE", NULL, "%s: position %llu is outside the constant frame rate", path,
-                       (unsigned long long)p);
+    if (s->vpts[p] <= s->vpts[p - 1u])
+      return diag_fail(m->diag, "MEDIA_TIMESTAMPS", NULL, "%s: positions %llu and %llu have the same pts", path,
+                       ULL(p - 1u), ULL(p));
   }
   return 1;
 }
@@ -393,6 +403,25 @@ static int64_t sample_at(const Source *s, uint64_t p) {
   AVRational tb = s->fmt->streams[s->vs]->time_base;
   int64_t x = av_rescale_q_rnd(s->vpts[p], tb, (AVRational){1, s->sample_rate}, AV_ROUND_DOWN) - s->a0;
   return x < 0 ? 0 : x;
+}
+
+/* The output pts of position P in a cut that starts at LO (O-2, M4-R2):
+   vpts[P] - vpts[LO] in the encoder time base 1/fr, rounded as fftools does
+   with -fps_mode passthrough (adjust_frame_pts_to_encoder_tb): to the nearest
+   tick, with extra bits and a small step away from an exact midpoint. */
+static int64_t out_pts(const Source *s, uint64_t lo, uint64_t p) {
+  AVRational tb = av_inv_q(s->fr);
+  int extra = av_clip(29 - av_log2((unsigned)tb.den), 0, 16);
+  AVRational fine = {tb.num, tb.den << extra};
+  double x = (double)av_rescale_q(s->vpts[p] - s->vpts[lo], s->fmt->streams[s->vs]->time_base, fine) / (double)(1 << extra);
+  double step = x == (double)llrint(x) ? 0.0 : 1.0 / (1 << 17);
+  return llrint(x + step);
+}
+
+/* The duration D of a decoded frame (stream time base) in the encoder time
+   base 1/fr, as fftools sets it (video_sync_process). */
+static int64_t out_duration(const Source *s, int64_t d) {
+  return llrint((double)d * av_q2d(s->fmt->streams[s->vs]->time_base) / av_q2d(av_inv_q(s->fr)));
 }
 
 static void drop_last_comma(char *text) {
@@ -587,6 +616,13 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
   drop_last_comma(vf);
   drop_last_comma(af);
   drop_last_comma(sf);
+  /* Two kept frames at one output pts: the CLI warns and its muxer moves a
+     dts. That output is not defined, so it is a refusal. */
+  for (uint64_t q = dlo + 1u; q <= dhi; q++) {
+    if (out_pts(s, dlo, q) <= out_pts(s, dlo, q - 1u))
+      return diag_fail(m->diag, "MEDIA_TIMESTAMPS", entry, "positions %llu and %llu round to one pts at the frame rate %d/%d",
+                       ULL(q - 1u), ULL(q), s->fr.num, s->fr.den);
+  }
   out->keep.lo = dlo;
   out->keep.hi = dhi;
   out->astart = audio ? sample_at(s, dlo) : 0;
@@ -658,7 +694,7 @@ int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_c
       fputs(" -af ", out);
       shell_word(out, af);
     }
-    fputc(' ', out);
+    fputs(" -fps_mode passthrough ", out);
     shell_path(out, out_path);
     fputc('\n', out);
     if (ferror(out) || fflush(out) != 0) {
@@ -851,14 +887,17 @@ static const char *enc_open(Enc *e, const Source *s, const char *path, const cha
     return "cannot add an output stream";
   e->vst->avg_frame_rate = s->fr;
   if (e->aenc != NULL) {
+    e->adelta = AV_NOPTS_VALUE;
     int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
     e->fifo = av_audio_fifo_alloc(e->aenc->sample_fmt, e->aenc->ch_layout.nb_channels, size);
+    e->audio_times = av_fifo_alloc2(8, sizeof(AudioSpan), AV_FIFO_FLAG_AUTO_GROW);
   }
   e->pkt = av_packet_alloc();
   e->frame = av_frame_alloc();
   e->chunk = av_frame_alloc();
   e->filtered = av_frame_alloc();
-  if (e->pkt == NULL || e->frame == NULL || e->chunk == NULL || e->filtered == NULL || (e->aenc != NULL && e->fifo == NULL))
+  if (e->pkt == NULL || e->frame == NULL || e->chunk == NULL || e->filtered == NULL
+      || (e->aenc != NULL && (e->fifo == NULL || e->audio_times == NULL)))
     return "out of memory";
   if (avio_open(&e->oc->pb, io_path, AVIO_FLAG_WRITE) < 0)
     return "cannot open the output file";
@@ -875,6 +914,7 @@ static int enc_free(Enc *e) {
   avcodec_free_context(&e->venc);
   avcodec_free_context(&e->aenc);
   av_audio_fifo_free(e->fifo);
+  av_fifo_freep2(&e->audio_times);
   avfilter_graph_free(&e->graph);
   av_packet_free(&e->pkt);
   av_frame_free(&e->frame);
@@ -901,9 +941,9 @@ static int send(Enc *e, AVCodecContext *enc, const AVStream *st, const AVFrame *
   return drained(r);
 }
 
-/* Encodes F without the decoder picture type, which libx264 would force. */
+/* Encodes F without the decoder picture type, which libx264 would force. F
+   keeps the duration that video_frames set (the graph does not change it). */
 static int video_out(Enc *e, AVFrame *f) {
-  f->duration = 1;
   f->time_base = e->venc->time_base;
   f->pict_type = AV_PICTURE_TYPE_NONE;
   f->flags &= ~AV_FRAME_FLAG_KEY;
@@ -924,16 +964,18 @@ static int filter_frame(Enc *e, AVFrame *f) {
   return drained(r);
 }
 
-/* Each kept frame gets pts = its rank in the cut (O-2, setpts=PTS-STARTPTS),
-   then goes through the graph of its active burns, if any. */
+/* Each kept frame gets the source timing (O-2, M4-R2, setpts=PTS-STARTPTS
+   and -fps_mode passthrough): its pts relative to the first kept frame and
+   its own duration, both in the encoder time base. Then it goes through the
+   graph of its active burns, if any. */
 static int video_frames(Enc *e) {
   int r = 0;
   while (r >= 0 && (r = avcodec_receive_frame(e->vdec, e->frame)) >= 0) {
     uint64_t p = e->position++;
     if (p >= e->cut.keep.lo && p <= e->cut.keep.hi) {
       uint64_t mask = mask_at(&e->cut, p);
-      e->frame->pts = (int64_t)(p - e->cut.keep.lo);
-      e->frame->duration = 1;
+      e->frame->pts = out_pts(e->src, e->cut.keep.lo, p);
+      e->frame->duration = out_duration(e->src, e->frame->duration);
       e->frame->time_base = e->venc->time_base;
       r = mask == e->mask ? 0 : graph_switch(e, mask);
       if (r >= 0)
@@ -942,6 +984,31 @@ static int video_frames(Enc *e) {
     av_frame_unref(e->frame);
   }
   return drained(r);
+}
+
+/* The pts of the first of N buffered samples. A chunk can cross a source
+   timestamp gap; its pts follows its first sample, as the CLI buffersink
+   does. Keep the next span's timing when a later chunk starts inside it. */
+static int audio_pts(Enc *e, int n, int64_t *pts) {
+  int first = 1;
+  while (n > 0) {
+    if (e->aremaining == 0) {
+      AudioSpan span;
+      if (av_fifo_read(e->audio_times, &span, 1) < 0)
+        return AVERROR(EIO);
+      e->apts = span.pts;
+      e->aremaining = span.samples;
+    }
+    if (first) {
+      *pts = e->apts;
+      first = 0;
+    }
+    int take = n < e->aremaining ? n : e->aremaining;
+    e->apts += take;
+    e->aremaining -= take;
+    n -= take;
+  }
+  return 0;
 }
 
 /* One encoder frame of N samples from the FIFO (the CLI buffersink frame
@@ -956,10 +1023,10 @@ static int audio_chunk(Enc *e, int n) {
     return AVERROR(ENOMEM);
   if (av_audio_fifo_read(e->fifo, (void **)f->extended_data, n) != n)
     return AVERROR(EIO);
-  f->pts = e->apts;
+  if (audio_pts(e, n, &f->pts) < 0)
+    return AVERROR(EIO);
   f->duration = n;
   f->time_base = e->aenc->time_base;
-  e->apts += n;
   return send(e, e->aenc, e->ast, f);
 }
 
@@ -968,6 +1035,11 @@ static int audio_chunk(Enc *e, int n) {
 static int audio_keep(Enc *e, const AVFrame *f) {
   int64_t lo = e->seen;
   int64_t hi = e->seen + f->nb_samples;
+  /* Match the CLI's audio clock: keep real gaps, but do not turn rounded
+     container timestamps into sample gaps (e.g. a Matroska 1 ms clock). */
+  int64_t pts = f->pts == AV_NOPTS_VALUE ? lo
+    : av_rescale_delta(e->src->fmt->streams[e->src->as]->time_base, f->pts,
+                       e->aenc->time_base, f->nb_samples, &e->adelta, e->aenc->time_base);
   int64_t a = lo > e->cut.astart ? lo : e->cut.astart;
   int64_t b = hi < e->cut.aend ? hi : e->cut.aend;
   e->seen = hi;
@@ -983,6 +1055,14 @@ static int audio_keep(Enc *e, const AVFrame *f) {
   for (int c = 0; c < planes; c++)
     ptrs[c] = f->extended_data[c] + (size_t)(a - lo) * stride;
   if (av_audio_fifo_write(e->fifo, (void **)ptrs, (int)(b - a)) < (int)(b - a))
+    return AVERROR(ENOMEM);
+  pts += a - lo;
+  if (!e->astarted) {
+    e->aorigin = pts;
+    e->astarted = 1;
+  }
+  AudioSpan span = {pts - e->aorigin, (int)(b - a)};
+  if (av_fifo_write(e->audio_times, &span, 1) < 0)
     return AVERROR(ENOMEM);
   int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
   int r = 0;
