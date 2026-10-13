@@ -64,28 +64,117 @@ static int frame_hashes(const char *ffmpeg, const char *input, const char *outpu
 
 /* Our build of ENTRY on INPUT and the reference command give equal framemd5
    lines for all streams (R1). */
-static int equals_ffmpeg(Machine *m, const char *ffmpeg, const char *entry, const char *input, const char *dir) {
+static int equals_ffmpeg_inputs(Machine *m, const char *ffmpeg, const char *entry, char *const *inputs, int input_count, const char *dir) {
   char ours[1200], ref[1200], oh[1200], rh[1200];
+  diag_init(m->diag);
   snprintf(ours, sizeof ours, "%s/vfr-ours.mp4", dir);
   snprintf(ref, sizeof ref, "%s/vfr-ref.mp4", dir);
   snprintf(oh, sizeof oh, "%s/vfr-ours.md5", dir);
   snprintf(rh, sizeof rh, "%s/vfr-ref.md5", dir);
-  char *inputs[] = {(char *)input};
   FILE *command = tmpfile();
-  int ok = command != NULL && media_build(m, entry, inputs, 1, ours) == 0
-    && media_ffmpeg(m, entry, inputs, 1, ref, command) == 0;
+  int ok = command != NULL && media_build(m, entry, inputs, input_count, ours) == 0
+    && media_ffmpeg(m, entry, inputs, input_count, ref, command) == 0;
   if (ok) {
     char line[8192];
     rewind(command);
     size_t n = fread(line, 1, sizeof line - 1u, command);
     line[n] = '\0';
     char *argv[] = {"sh", "-c", line, NULL};
-    ok = !ferror(command) && n < sizeof line - 1u && child(argv) == 0
+    int ran = !ferror(command) && n < sizeof line - 1u ? child(argv) : -1;
+    if (ran != 0) fprintf(stderr, "R1 reference exit %d: %s", ran, line);
+    ok = !ferror(command) && n < sizeof line - 1u && ran == 0
       && frame_hashes(ffmpeg, ours, oh) && frame_hashes(ffmpeg, ref, rh) && same_file(oh, rh);
   }
   if (command != NULL) fclose(command);
-  remove(ours); remove(ref); remove(oh); remove(rh);
+  if (ok) {
+    remove(ours); remove(ref); remove(oh); remove(rh);
+  } else {
+    fprintf(stderr, "R1 %s: outputs %s and %s, hashes %s and %s\n", entry, ours, ref, oh, rh);
+    if (m->diag->set) diag_print(m->diag, stderr);
+  }
   return ok;
+}
+
+static int equals_ffmpeg(Machine *m, const char *ffmpeg, const char *entry, const char *input, const char *dir) {
+  char *inputs[] = {(char *)input};
+  return equals_ffmpeg_inputs(m, ffmpeg, entry, inputs, 1, dir);
+}
+
+/* A trim preserves the positions of its input. A concat starts new ranks,
+   including when it contains a previously trimmed concat. */
+static void concat_cases(const char *ffmpeg, const char *input, const char *dir) {
+  static char vf[FILTER_MAX], af[FILTER_MAX], sf[FILTER_MAX];
+  const char *program =
+    "def twice : Video -> Video := fun (v : Video) => trim (interval 20 70) (trim (interval 10 80) (concat v v))\n"
+    "def text : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 20 25) \"Hi\") nil) (trim (interval 10 80) (concat v v))\n"
+    "def nested : Video -> Video := fun (v : Video) => trim (interval 20 100) (concat (trim (interval 10 80) (concat v v)) v)\n"
+    "def sar : Video -> Video := fun (v : Video) => concat (scale (res 160 240) v) (crop (rect 0 0 160 240) v)\n"
+    "def matchingSAR : Video -> Video := fun (v : Video) => concat (scale (res 160 240) v) (crop (rect 0 0 160 240) (scale (res 160 240) v))\n"
+    "def pairVideos : Video -> Video -> Video := fun (a : Video) (b : Video) => concat a b\n";
+  Arena arena; Diag diag; Machine m; DeclList decls;
+  arena_init(&arena, (size_t)64 << 20); diag_init(&diag);
+  int loaded = front_load(&arena, "concat-review.lang", program, strlen(program), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  expect("concat review program loads", loaded);
+  if (!loaded) { diag_print(&diag, stderr); arena_release(&arena); return; }
+  char *inputs[] = {(char *)input, "/System/Library/Fonts/Supplemental/Arial.ttf"};
+  const char *entries[] = {"twice", "text", "nested"};
+  for (size_t i = 0; i < sizeof entries / sizeof entries[0]; i++) {
+    Build b; int status = 1; diag_init(&diag);
+    int ok = build_prepare(&m, entries[i], inputs, i == 1 ? 2 : 1, &b, vf, af, sf, NULL, &status);
+    if (i == 0)
+      expect("successive pushed trims preserve positions", ok && b.plan.seg_count == 2
+        && b.cuts[0].keep.lo == 20 && b.cuts[0].keep.hi == 49
+        && b.cuts[1].keep.lo == 0 && b.cuts[1].keep.hi == 20);
+    else if (i == 1)
+      expect("pushed text after trim preserves positions", ok && b.cuts[0].burn_count == 1
+        && b.cuts[0].burns[0].lo == 20 && b.cuts[0].burns[0].hi == 25 && b.cuts[1].burn_count == 0);
+    else
+      expect("nested concat starts new ranks", ok && b.plan.seg_count == 3
+        && b.cuts[0].keep.lo == 30 && b.cuts[0].keep.hi == 49
+        && b.cuts[1].keep.lo == 0 && b.cuts[1].keep.hi == 30
+        && b.cuts[2].keep.lo == 0 && b.cuts[2].keep.hi == 29);
+    build_close(&b);
+  }
+  expect("concat text after trim equals ffmpeg", equals_ffmpeg_inputs(&m, ffmpeg, "text", inputs, 2, dir));
+  expect("concat matching transformed SAR equals ffmpeg", equals_ffmpeg(&m, ffmpeg, "matchingSAR", input, dir));
+  Build b; int status = 1; diag_init(&diag);
+  int ok = build_prepare(&m, "sar", inputs, 1, &b, vf, af, sf, NULL, &status);
+  expect("concat refuses different operand SAR", !ok && status == 1
+    && diag.code != NULL && strcmp(diag.code, "CONCAT_SHAPE") == 0);
+  build_close(&b);
+  char slower[1200]; snprintf(slower, sizeof slower, "%s/slower.mp4", dir);
+  int made = fixture(ffmpeg, "24", slower);
+  expect("make different frame rate concat input", made);
+  if (made) {
+    char *pair[] = {(char *)input, slower};
+    expect("concat different frame rates equal ffmpeg", equals_ffmpeg_inputs(&m, ffmpeg, "pairVideos", pair, 2, dir));
+    pair[0] = slower; pair[1] = (char *)input;
+    diag_init(&diag);
+    FILE *command = tmpfile();
+    int printed = command == NULL ? -1 : media_ffmpeg(&m, "pairVideos", pair, 2, slower, command);
+    expect("concat faster second input refuses timestamp collisions", printed == 1
+      && diag.code != NULL && strcmp(diag.code, "MEDIA_TIMESTAMPS") == 0);
+    if (command != NULL) fclose(command);
+  }
+  if (!failed) remove(slower);
+  char short_audio[1200], long_audio[1200];
+  snprintf(short_audio, sizeof short_audio, "%s/short-audio.mp4", dir);
+  snprintf(long_audio, sizeof long_audio, "%s/long-audio.mp4", dir);
+  char *short_args[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", (char *)input,
+    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=44100:duration=1", "-c:v", "copy", "-c:a", "aac", short_audio, NULL};
+  char *long_args[] = {(char *)ffmpeg, "-nostdin", "-loglevel", "error", "-y", "-i", (char *)input,
+    "-f", "lavfi", "-i", "sine=frequency=880:sample_rate=44100:duration=3", "-c:v", "copy", "-c:a", "aac", long_audio, NULL};
+  int audio_made = child(short_args) == 0 && child(long_args) == 0;
+  expect("make concat seam audio inputs", audio_made);
+  if (audio_made) {
+    char *pair[] = {short_audio, long_audio};
+    expect("concat pads short audio to video seam", equals_ffmpeg_inputs(&m, ffmpeg, "pairVideos", pair, 2, dir));
+    pair[0] = long_audio; pair[1] = short_audio;
+    expect("concat follows audio end past video seam", equals_ffmpeg_inputs(&m, ffmpeg, "pairVideos", pair, 2, dir));
+  }
+  if (!failed) { remove(short_audio); remove(long_audio); }
+  arena_release(&arena);
 }
 
 /* Seeking must preserve R1 for closed and open GOPs and gradual intra
@@ -827,6 +916,7 @@ int main(void) {
   audio_clock_cases(ffmpeg, dir);
   text_escape_cases(dir);
   plan_cases(input);
+  concat_cases(ffmpeg, input, dir);
   escaper_cases();
   window_cases(input);
   mask_cases();

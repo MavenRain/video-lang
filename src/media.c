@@ -7,7 +7,12 @@
    the ffmpeg CLI does for .mp4 (O-5). The ffmpeg verb prints the reference
    argv of the same chain. M2 adds Font parameters and burnText: each track
    entry is one drawtext, active on its window of positions. In process the
-   live graph is rebuilt each time the set of active entries changes. */
+   live graph is rebuilt each time the set of active entries changes. M6 adds
+   concat: the plan is a list of segments (input, steps); the steps after a
+   concat are pushed into each segment (D-M6-5); the reference argv is the
+   -filter_complex form with the concat filter; the encode runs the segments
+   in order with one encoder pair and the timing continues at the seam by the
+   rule of that filter (D-M6-2, D-M6-8). */
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
@@ -26,17 +31,26 @@
 #include <libavformat/avformat.h>
 #include <libavutil/audio_fifo.h>
 #include <libavutil/fifo.h>
+#include <libavutil/pixdesc.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 
 #include "media.h"
 
 #define STEP_MAX 64u
+#define SEG_MAX 64u
 #define TEXT_MAX 64u /* the in-process mask is one uint64_t */
 #define PARAM_MAX 64u
 #define FILTER_MAX 65536u
 #define PLANE_MAX 64
 #define ULL(x) ((unsigned long long)(x))
+/* The one segment API that test/mediareview.c binds to (it includes this
+   file); langc itself does not call it. */
+#if defined(__GNUC__) || defined(__TINYC__)
+#define REVIEW_API __attribute__((unused))
+#else
+#define REVIEW_API
+#endif
 
 typedef struct {
   uint64_t lo;
@@ -48,13 +62,22 @@ typedef enum { STEP_TRIM, STEP_SCALE, STEP_CROP, STEP_PAD, STEP_TEXT } StepKind;
 /* One op of the residual with the numbers of its first argument, in
    constructor order: interval lo hi, res w h, rect x y w h, padSpec w h x y
    color, style font size color x y (font = the input index). A text step
-   also holds its track entries [e0, e1) of the plan table. */
+   also holds its track entries [e0, e1) of the plan table. ID is the
+   residual step this one is a copy of: a step above a concat is copied into
+   each segment under it, and ID is its row of the shift table (D-M6-5). */
 typedef struct {
   StepKind kind;
   uint64_t n[5];
   uint32_t e0;
   uint32_t e1;
+  uint32_t id;
+  int reset; /* this step reads the new ranks of a concat */
 } Step;
+
+typedef struct {
+  uint64_t next;
+  int started;
+} PositionShift;
 
 /* One track entry: the positions lo..hi and the Text bytes. */
 typedef struct {
@@ -64,15 +87,31 @@ typedef struct {
   uint64_t len;
 } TextEntry;
 
-/* The residual of the entry: input INPUT under STEPS, innermost first.
-   FONTS has bit i when parameter i is a Font. */
+/* One segment of the plan (D-M6-5): input INPUT under the steps [S0, S1) of
+   the plan table, innermost first. The first INNER steps sit below every
+   concat and count the positions of the source (D2); the steps after them
+   were pushed through a concat and count the positions of the result of
+   that concat. ABOVE is the number of steps (the last of the run) outside
+   the lowest concat that this segment shares with the segment before it. */
 typedef struct {
   uint32_t input;
+  uint32_t s0;
+  uint32_t s1;
+  uint32_t inner;
+  uint32_t above;
+} Segment;
+
+/* The residual of the entry: the segments in order over one step table.
+   FONTS has bit i when parameter i is a Font. IDS counts the residual steps. */
+typedef struct {
+  Segment segs[SEG_MAX];
+  uint32_t seg_count;
   Step steps[STEP_MAX];
   uint32_t step_count;
   TextEntry entries[TEXT_MAX];
   uint32_t entry_count;
   uint64_t fonts;
+  uint32_t ids;
 } Plan;
 
 /* One drawtext of the in-process graph: active on the absolute positions
@@ -142,6 +181,14 @@ typedef struct {
   AVFilterContext *bsrc;
   AVFilterContext *bsink;
   AVFrame *filtered;
+  AVRational fr;       /* the frame rate of the first segment: the encoder time base is 1/fr */
+  int concat;          /* 2+ segments: the timing goes through the concat time base 1/1000000 */
+  int64_t delta_us;    /* the start of the current segment on the concat clock */
+  int64_t vend_us;     /* the video end of the current segment from its start (D-M6-2) */
+  int64_t aend_us;     /* the audio end of the current segment from its start */
+  int64_t last_pts;    /* the pts of the last video frame sent to the encoder */
+  int collided;        /* a video frame rounds to the pts of the frame before it */
+  uint64_t collide_at; /* the position of that frame */
   uint64_t position; /* the next video position out of the decoder */
   int skewed;        /* a decoded frame does not have the pts of its position */
   int64_t skew_pts;  /* the pts of that frame */
@@ -249,17 +296,104 @@ static int step_of(const Value *a, int row, Step *out) {
   return 1;
 }
 
+/* The walk of the residual (D-M6-5). STACK holds the steps that apply to the
+   current node, the outermost at index 0. */
+typedef struct {
+  Machine *m;
+  const char *entry;
+  uint32_t level;
+  Plan *plan;
+  Step stack[STEP_MAX];
+  uint32_t depth;
+} Walk;
+
+/* Puts the step V (of ROW) on the stack with a new id. */
+static int peel(Walk *w, const Value *v, int row) {
+  Plan *plan = w->plan;
+  if (w->depth == STEP_MAX)
+    return diag_fail(w->m->diag, "MEDIA_LIMIT", w->entry, "more than %u steps", STEP_MAX);
+  Step *st = &w->stack[w->depth];
+  if (row == 4) {
+    if (!style_of(v->args[0], plan->fonts, st))
+      return diag_fail(w->m->diag, "MEDIA_SHAPE", w->entry, "an argument is not `style f size color x y` with numbers");
+    st->e0 = plan->entry_count;
+    int track = track_of(v->args[1], plan);
+    if (track == 2)
+      return diag_fail(w->m->diag, "TEXT_LIMIT", w->entry, "more than %u track entries", TEXT_MAX);
+    if (track != 0)
+      return diag_fail(w->m->diag, "MEDIA_SHAPE", w->entry, "a track is not a list of `pair (interval lo hi) \"...\"`");
+    st->e1 = plan->entry_count;
+  } else if (!step_of(v->args[0], row, st)) {
+    return diag_fail(w->m->diag, "MEDIA_SHAPE", w->entry, "an argument is not `%s` with numbers", STEP_ROWS[row].shape);
+  }
+  if (st->kind == STEP_TRIM && st->n[0] > st->n[1])
+    return diag_fail(w->m->diag, "INTERVAL_ORDER", w->entry, "interval %llu %llu has lo > hi", ULL(st->n[0]), ULL(st->n[1]));
+  st->id = plan->ids++;
+  st->reset = 0;
+  w->depth++;
+  return 1;
+}
+
+/* One segment for the Video parameter V under the stack, innermost first.
+   CONCAT is the stack depth at the lowest concat above V (0: none): the
+   steps below it are inner. LCA is the stack depth at the concat where the
+   segment before this one meets it (ABOVE of the segment). */
+static int leaf(Walk *w, const Value *v, uint32_t concat, uint32_t lca) {
+  Plan *plan = w->plan;
+  if (plan->seg_count == SEG_MAX)
+    return diag_fail(w->m->diag, "MEDIA_LIMIT", w->entry, "more than %u segments", SEG_MAX);
+  if (w->depth > STEP_MAX - plan->step_count)
+    return diag_fail(w->m->diag, "MEDIA_LIMIT", w->entry, "the segments hold more than %u steps", STEP_MAX);
+  Segment *seg = &plan->segs[plan->seg_count++];
+  seg->input = (uint32_t)v->nat;
+  seg->s0 = plan->step_count;
+  for (uint32_t k = 0; k < w->depth; k++)
+    plan->steps[seg->s0 + k] = w->stack[w->depth - 1u - k];
+  plan->step_count += w->depth;
+  seg->s1 = plan->step_count;
+  seg->inner = w->depth - concat;
+  seg->above = lca;
+  return 1;
+}
+
+/* The residual node V: its steps go on the stack, outermost first; then the
+   core is a Video parameter (one segment) or a stuck concat (the segments
+   of both operands, in order, D-M6-5). The steps come off on return. */
+static int walk(Walk *w, const Value *v, uint32_t concat, uint32_t lca) {
+  uint32_t from = w->depth;
+  int ok = 1;
+  int row = step_row(v);
+  while (ok && row >= 0) {
+    ok = peel(w, v, row);
+    v = v->args[row == 4 ? 2 : 1];
+    row = step_row(v);
+  }
+  if (ok && v->kind == VAL_STUCK && v->op == OP_CONCAT && v->argc == 2u) {
+    if (w->depth > concat)
+      w->stack[w->depth - 1u].reset = 1;
+    ok = walk(w, v->args[0], w->depth, lca) && walk(w, v->args[1], w->depth, w->depth);
+  } else if (ok && v->kind == VAL_VAR && v->nat < w->level && !(w->plan->fonts >> v->nat & 1u))
+    ok = leaf(w, v, concat, lca);
+  else if (ok)
+    ok = diag_fail(w->m->diag, "MEDIA_SHAPE", w->entry,
+                   "the result is not a chain of trim, scale, crop, pad, burnText and concat over inputs");
+  w->depth = from;
+  return ok;
+}
+
 /* Applies ENTRY to one neutral input per Video or Font parameter and reads
-   the step chain of the residual. *STATUS is the exit status of a failure. */
+   the segments of the residual. *STATUS is the exit status of a failure. */
 static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, int *status) {
   uint32_t d = 0;
   uint32_t level = 0;
-  Step rev[STEP_MAX];
-  uint32_t n = 0;
+  Walk w;
   *status = 1;
   m->def = entry;
   plan->entry_count = 0;
   plan->fonts = 0;
+  plan->seg_count = 0;
+  plan->step_count = 0;
+  plan->ids = 0;
   if (!find_entry(m, entry, &d))
     return diag_fail(m->diag, "EVAL_ENTRY", entry, "no definition has this name");
   const Value *v = def_value(m, d);
@@ -281,40 +415,12 @@ static int plan_of(Machine *m, const char *entry, int input_count, Plan *plan, i
     *status = 2;
     return diag_fail(m->diag, "MEDIA_ARGS", entry, "the entry takes %u inputs, found %d", level, input_count);
   }
-  int row = step_row(v);
-  while (row >= 0) {
-    if (n == STEP_MAX)
-      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "more than %u steps", STEP_MAX);
-    if (row == 4) {
-      if (!style_of(v->args[0], plan->fonts, &rev[n]))
-        return diag_fail(m->diag, "MEDIA_SHAPE", entry, "an argument is not `style f size color x y` with numbers");
-      rev[n].e0 = plan->entry_count;
-      int track = track_of(v->args[1], plan);
-      if (track == 2)
-        return diag_fail(m->diag, "TEXT_LIMIT", entry, "more than %u track entries", TEXT_MAX);
-      if (track != 0)
-        return diag_fail(m->diag, "MEDIA_SHAPE", entry, "a track is not a list of `pair (interval lo hi) \"...\"`");
-      rev[n].e1 = plan->entry_count;
-    } else if (!step_of(v->args[0], row, &rev[n])) {
-      return diag_fail(m->diag, "MEDIA_SHAPE", entry, "an argument is not `%s` with numbers", STEP_ROWS[row].shape);
-    }
-    if (rev[n].kind == STEP_TRIM && rev[n].n[0] > rev[n].n[1])
-      return diag_fail(m->diag, "INTERVAL_ORDER", entry, "interval %llu %llu has lo > hi", ULL(rev[n].n[0]), ULL(rev[n].n[1]));
-    n++;
-    v = v->args[row == 4 ? 2 : 1];
-    row = step_row(v);
-  }
-  /* video-lang M6 Step 3 site: a stuck concat (OP_CONCAT) makes a segment
-     list here (D-M6-5), and CONCAT_SHAPE refuses operands that differ in
-     size, pixel format, audio presence, sample rate or channel layout
-     (D-M6-3). Until Step 3 a concat residual refuses as MEDIA_SHAPE. */
-  if (v->kind != VAL_VAR || v->nat >= level || (plan->fonts >> v->nat & 1u))
-    return diag_fail(m->diag, "MEDIA_SHAPE", entry, "the result is not a chain of trim, scale, crop, pad and burnText over an input");
-  plan->input = (uint32_t)v->nat;
-  plan->step_count = n;
-  for (uint32_t k = 0; k < n; k++)
-    plan->steps[k] = rev[n - 1u - k];
-  return 1;
+  memset(&w, 0, sizeof w);
+  w.m = m;
+  w.entry = entry;
+  w.level = level;
+  w.plan = plan;
+  return walk(&w, v, 0, 0);
 }
 
 static void source_close(Source *s) {
@@ -421,17 +527,28 @@ static int64_t sample_at(const Source *s, uint64_t p) {
   return x < 0 ? 0 : x;
 }
 
-/* The output pts of position P in a cut that starts at LO (O-2, M4-R2):
-   vpts[P] - vpts[LO] in the encoder time base 1/fr, rounded as fftools does
+/* PTS (time base TB) in the encoder time base 1/FR, rounded as fftools does
    with -fps_mode passthrough (adjust_frame_pts_to_encoder_tb): to the nearest
    tick, with extra bits and a small step away from an exact midpoint. */
-static int64_t out_pts(const Source *s, uint64_t lo, uint64_t p) {
-  AVRational tb = av_inv_q(s->fr);
-  int extra = av_clip(29 - av_log2((unsigned)tb.den), 0, 16);
-  AVRational fine = {tb.num, tb.den << extra};
-  double x = (double)av_rescale_q(s->vpts[p] - s->vpts[lo], s->fmt->streams[s->vs]->time_base, fine) / (double)(1 << extra);
+static int64_t round_pts(int64_t pts, AVRational tb, AVRational fr) {
+  AVRational enc = av_inv_q(fr);
+  int extra = av_clip(29 - av_log2((unsigned)enc.den), 0, 16);
+  AVRational fine = {enc.num, enc.den << extra};
+  double x = (double)av_rescale_q(pts, tb, fine) / (double)(1 << extra);
   double step = x == (double)llrint(x) ? 0.0 : 1.0 / (1 << 17);
   return llrint(x + step);
+}
+
+/* The output pts of position P in a cut that starts at LO (O-2, M4-R2):
+   vpts[P] - vpts[LO] in the encoder time base 1/fr of S. */
+static int64_t out_pts(const Source *s, uint64_t lo, uint64_t p) {
+  return round_pts(s->vpts[p] - s->vpts[lo], s->fmt->streams[s->vs]->time_base, s->fr);
+}
+
+/* vpts[P] - vpts[LO] in the concat time base 1/1000000: the concat filter
+   rescales each input to it (D-M6-2). */
+static int64_t rel_us(const Source *s, uint64_t lo, uint64_t p) {
+  return av_rescale_q(s->vpts[p] - s->vpts[lo], s->fmt->streams[s->vs]->time_base, AV_TIME_BASE_Q);
 }
 
 /* The duration D of a decoded frame (stream time base) in the encoder time
@@ -584,15 +701,25 @@ static int fonts_open(Machine *m, char *const *inputs, int input_count, uint64_t
    input (D2). SF gets the spatial steps alone. A text step puts one drawtext
    per entry in VF, with the window of the entry relative to the step input
    (an entry outside the domain is left out), and the same drawtext with no
-   enable in OUT->burns, at its slot of SF. An empty domain (D3), a crop
-   outside its frame and a pad that does not hold its frame are refused. */
-static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s, char *const *inputs, char *vf, char *af, char *sf, Cut *out) {
+   enable in OUT->burns, at its slot of SF. An empty domain (D3, D-M6-6), a
+   crop outside its frame and a pad that does not hold its frame are refused.
+   M6: the cut is of segment K of P over its source S. An inner step counts
+   the positions of S (D2). A pushed step counts the positions of the result
+   of the concat it came through: SHIFT[id].next is the input domain origin
+   plus the frames of earlier segments at that step. Only a step directly
+   above a concat resets the origin; later steps preserve it through trims.
+   Each step adds its input frame count for the next segment (D-M6-4,
+   D-M6-5). FIRST is the source of segment 0: with 2+ segments the pts round
+   through 1/1000000 to its 1/fr (D-M6-2). */
+static int cut_of(Machine *m, const char *entry, const Plan *p, uint32_t k, const Source *s, const Source *first, char *const *inputs, PositionShift *shift, char *vf, char *af, char *sf, Cut *out) {
+  const Segment *seg = &p->segs[k];
   const AVCodecParameters *par = s->fmt->streams[s->vs]->codecpar;
   char draw[FILTER_MAX];
   int ok = 1;
   out->burn_count = 0;
   uint64_t dlo = 0;
   uint64_t dhi = s->frames - 1u;
+  uint64_t domain_lo = 0;
   uint64_t w = (uint64_t)par->width;
   uint64_t h = (uint64_t)par->height;
   uint32_t trims = 0;
@@ -603,18 +730,28 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
   vf[0] = '\0';
   af[0] = '\0';
   sf[0] = '\0';
-  for (uint32_t k = 0; k < p->step_count; k++) {
-    const uint64_t *n = p->steps[k].n;
+  for (uint32_t i = seg->s0; i < seg->s1; i++) {
+    const Step *st = &p->steps[i];
+    const uint64_t *n = st->n;
     char text[160];
     int spatial = 1;
+    int pushed = i - seg->s0 >= seg->inner;
+    /* The positions of the step input as the step counts them (D-M6-5). */
+    if (pushed && !shift[st->id].started) {
+      shift[st->id].next = st->reset ? 0 : domain_lo;
+      shift[st->id].started = 1;
+    }
+    uint64_t plo = pushed ? shift[st->id].next : dlo;
+    uint64_t phi = plo + (dhi - dlo);
+    domain_lo = plo;
     text[0] = '\0';
-    switch (p->steps[k].kind) {
+    switch (st->kind) {
     case STEP_TRIM: {
-      uint64_t lo = n[0] > dlo ? n[0] : dlo;
-      uint64_t hi = n[1] < dhi ? n[1] : dhi;
-      if (lo > hi)
+      if (n[1] < plo || n[0] > phi)
         return diag_fail(m->diag, "EMPTY_VIDEO", entry, "trim (interval %llu %llu) keeps no frame of positions %llu..%llu",
-                         ULL(n[0]), ULL(n[1]), ULL(dlo), ULL(dhi));
+                         ULL(n[0]), ULL(n[1]), ULL(plo), ULL(phi));
+      uint64_t lo = dlo + ((n[0] > plo ? n[0] : plo) - plo);
+      uint64_t hi = dlo + ((n[1] < phi ? n[1] : phi) - plo);
       snprintf(text, sizeof text, "trim=start_frame=%llu:end_frame=%llu,setpts=PTS-STARTPTS,", ULL(lo - dlo), ULL(hi - dlo + 1u));
       if (audio) {
         int64_t base = sample_at(s, dlo);
@@ -625,6 +762,7 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
       }
       dlo = lo;
       dhi = hi;
+      domain_lo = n[0] > plo ? n[0] : plo;
       trims++;
       spatial = 0;
       break;
@@ -651,14 +789,14 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
       h = n[1];
       break;
     case STEP_TEXT:
-      for (uint32_t i = p->steps[k].e0; ok && i < p->steps[k].e1; i++) {
-        const TextEntry *t = &p->entries[i];
+      for (uint32_t j = st->e0; ok && j < st->e1; j++) {
+        const TextEntry *t = &p->entries[j];
         const char *fp = inputs[n[0]];
-        uint64_t lo = t->lo > dlo ? t->lo : dlo;
-        uint64_t hi = t->hi < dhi ? t->hi : dhi;
         size_t dn = 0;
-        if (lo > hi)
+        if (t->hi < plo || t->lo > phi)
           continue;
+        uint64_t lo = dlo + ((t->lo > plo ? t->lo : plo) - plo);
+        uint64_t hi = dlo + ((t->hi < phi ? t->hi : phi) - plo);
         ok = put(draw, &dn, "drawtext=fontfile=") && put_escaped(draw, &dn, fp, strlen(fp)) && put(draw, &dn, ":text=")
              && put_escaped(draw, &dn, t->bytes, t->len)
              && put(draw, &dn, ":expansion=none:fontsize=%llu:fontcolor=0x%06llx:x=%llu:y=%llu", ULL(n[1]), ULL(n[2]), ULL(n[3]), ULL(n[4]))
@@ -672,6 +810,8 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
       spatial = 0;
       break;
     }
+    if (pushed)
+      shift[st->id].next += phi - plo + 1u;
     ok = ok && put(vf, &vn, "%s", text) && (!spatial || put(sf, &sn, "%s", text));
     if (!ok)
       return diag_fail(m->diag, "MEDIA_LIMIT", entry, "a filter chain is longer than %u bytes", FILTER_MAX);
@@ -685,11 +825,17 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
   drop_last_comma(af);
   drop_last_comma(sf);
   /* Two kept frames at one output pts: the CLI warns and its muxer moves a
-     dts. That output is not defined, so it is a refusal. */
+     dts. That output is not defined, so it is a refusal. With 2+ segments
+     the pts goes through the concat time base to 1/fr of the first segment
+     (D-M6-2); the seam offset can still move a rounding, which encode_all
+     checks on the frame. */
+  int concat = p->seg_count > 1u;
   for (uint64_t q = dlo + 1u; q <= dhi; q++) {
-    if (out_pts(s, dlo, q) <= out_pts(s, dlo, q - 1u))
+    int64_t a = concat ? round_pts(rel_us(s, dlo, q - 1u), AV_TIME_BASE_Q, first->fr) : out_pts(s, dlo, q - 1u);
+    int64_t b = concat ? round_pts(rel_us(s, dlo, q), AV_TIME_BASE_Q, first->fr) : out_pts(s, dlo, q);
+    if (b <= a)
       return diag_fail(m->diag, "MEDIA_TIMESTAMPS", entry, "positions %llu and %llu round to one pts at the frame rate %d/%d",
-                       ULL(q - 1u), ULL(q), s->fr.num, s->fr.den);
+                       ULL(q - 1u), ULL(q), first->fr.num, first->fr.den);
   }
   out->keep.lo = dlo;
   out->keep.hi = dhi;
@@ -699,20 +845,175 @@ static int cut_of(Machine *m, const char *entry, const Plan *p, const Source *s,
   return 1;
 }
 
-/* Plan, demux and cut. *STATUS is the exit status of a failure. */
-static int prepare(Machine *m, const char *entry, char *const *inputs, int input_count, Source *src, char *vf, char *af, char *sf, Cut *cut, int *status) {
+/* The frame size and SAR of segment K after COUNT steps of its run. Scale
+   preserves display aspect ratio, while crop and pad preserve sample SAR. */
+static void size_after(const Plan *p, uint32_t k, uint32_t count, const Source *s, uint64_t *w, uint64_t *h, AVRational *sar) {
+  const AVCodecParameters *par = s->fmt->streams[s->vs]->codecpar;
+  const Segment *seg = &p->segs[k];
+  *w = (uint64_t)par->width;
+  *h = (uint64_t)par->height;
+  *sar = av_guess_sample_aspect_ratio(s->fmt, s->fmt->streams[s->vs], NULL);
+  for (uint32_t i = seg->s0; i < seg->s0 + count; i++) {
+    const uint64_t *n = p->steps[i].n;
+    switch (p->steps[i].kind) {
+    case STEP_SCALE:
+      av_reduce(&sar->num, &sar->den, (int64_t)sar->num * (int64_t)*w * (int64_t)n[1],
+                (int64_t)sar->den * (int64_t)*h * (int64_t)n[0], INT_MAX);
+      *w = n[0];
+      *h = n[1];
+      break;
+    case STEP_CROP:
+      *w = n[2];
+      *h = n[3];
+      break;
+    case STEP_PAD:
+      *w = n[0];
+      *h = n[1];
+      break;
+    case STEP_TRIM:
+    case STEP_TEXT:
+      break;
+    }
+  }
+}
+
+/* CONCAT_SHAPE (D-M6-3): the two operands of each concat must agree in frame
+   size, pixel format, audio presence, sample rate and channel layout. The
+   concat filter also needs matching known sample aspect ratios. Each
+   pair of neighbour segments meets at the lowest concat above both (ABOVE
+   of the second), where the frame size is the one after the steps below
+   that concat; every concat is the meeting point of one such pair. The
+   other properties come from the sources. */
+static int shape_check(Machine *m, const char *entry, const Plan *p, const Source *srcs, char *const *inputs) {
+  for (uint32_t k = 1; k < p->seg_count; k++) {
+    const Segment *a = &p->segs[k - 1u];
+    const Segment *b = &p->segs[k];
+    const Source *sa = &srcs[k - 1u];
+    const Source *sb = &srcs[k];
+    const char *pa = inputs[a->input];
+    const char *pb = inputs[b->input];
+    const AVCodecParameters *va = sa->fmt->streams[sa->vs]->codecpar;
+    const AVCodecParameters *vb = sb->fmt->streams[sb->vs]->codecpar;
+    uint64_t wa = 0;
+    uint64_t ha = 0;
+    uint64_t wb = 0;
+    uint64_t hb = 0;
+    AVRational sara, sarb;
+    size_after(p, k - 1u, (a->s1 - a->s0) - b->above, sa, &wa, &ha, &sara);
+    size_after(p, k, (b->s1 - b->s0) - b->above, sb, &wb, &hb, &sarb);
+    if (wa != wb || ha != hb)
+      return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s gives %llux%llu frames, %s gives %llux%llu",
+                       pa, ULL(wa), ULL(ha), pb, ULL(wb), ULL(hb));
+    if (sara.num > 0 && sarb.num > 0 && av_cmp_q(sara, sarb) != 0)
+      return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s gives SAR %d/%d, %s gives SAR %d/%d",
+                       pa, sara.num, sara.den, pb, sarb.num, sarb.den);
+    if (va->format != vb->format) {
+      const char *fa = av_get_pix_fmt_name((enum AVPixelFormat)va->format);
+      const char *fb = av_get_pix_fmt_name((enum AVPixelFormat)vb->format);
+      return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s is %s, %s is %s", pa, fa == NULL ? "unknown" : fa, pb,
+                       fb == NULL ? "unknown" : fb);
+    }
+    if ((sa->as >= 0) != (sb->as >= 0))
+      return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s has %s, %s has %s", pa, sa->as >= 0 ? "audio" : "no audio", pb,
+                       sb->as >= 0 ? "audio" : "no audio");
+    if (sa->as >= 0) {
+      const AVCodecParameters *aa = sa->fmt->streams[sa->as]->codecpar;
+      const AVCodecParameters *ab = sb->fmt->streams[sb->as]->codecpar;
+      char la[64];
+      char lb[64];
+      if (sa->sample_rate != sb->sample_rate)
+        return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s has %d Hz audio, %s has %d Hz", pa, sa->sample_rate, pb,
+                         sb->sample_rate);
+      if (av_channel_layout_compare(&aa->ch_layout, &ab->ch_layout) != 0) {
+        if (av_channel_layout_describe(&aa->ch_layout, la, sizeof la) < 0)
+          snprintf(la, sizeof la, "unknown");
+        if (av_channel_layout_describe(&ab->ch_layout, lb, sizeof lb) < 0)
+          snprintf(lb, sizeof lb, "unknown");
+        return diag_fail(m->diag, "CONCAT_SHAPE", entry, "concat: %s has %s audio, %s has %s", pa, la, pb, lb);
+      }
+    }
+  }
+  return 1;
+}
+
+/* The plan with one demuxed source and one cut per segment (D-M6-7: the
+   same file in two segments opens twice). OPENED counts the sources that
+   source_open touched, for the close. */
+typedef struct {
   Plan plan;
+  Source srcs[SEG_MAX];
+  Cut cuts[SEG_MAX];
+  uint32_t opened;
+} Build;
+
+static void build_close(Build *b) {
+  for (uint32_t k = 0; k < b->opened; k++)
+    source_close(&b->srcs[k]);
+}
+
+/* Plan, demux and cut every segment, then the concat checks. VF, AF and SF
+   are scratch (FILTER_MAX bytes each; after the call they hold the chains of
+   the last segment); each cut keeps a copy of its SF in the arena. FC (not
+   NULL: FILTER_MAX bytes) gets `[k:v]VF[vk];[k:a]AF[ak];` per segment, the
+   input chains of the -filter_complex form (D-M6-5). *STATUS is the exit
+   status of a failure. */
+static int build_prepare(Machine *m, const char *entry, char *const *inputs, int input_count, Build *b, char *vf, char *af, char *sf, char *fc, int *status) {
+  PositionShift shift[STEP_MAX] = {{0, 0}};
+  size_t fn = 0;
+  memset(b, 0, sizeof *b);
+  av_log_set_level(AV_LOG_ERROR);
+  if (!plan_of(m, entry, input_count, &b->plan, status) || !fonts_open(m, inputs, input_count, b->plan.fonts, status))
+    return 0;
+  for (uint32_t k = 0; k < b->plan.seg_count; k++) {
+    b->srcs[k].vs = -1;
+    b->srcs[k].as = -1;
+    b->opened = k + 1u;
+    if (!source_open(m, inputs[b->plan.segs[k].input], &b->srcs[k], status))
+      return 0;
+  }
+  *status = 1;
+  if (fc != NULL)
+    fc[0] = '\0';
+  for (uint32_t k = 0; k < b->plan.seg_count; k++) {
+    Cut *cut = &b->cuts[k];
+    if (!cut_of(m, entry, &b->plan, k, &b->srcs[k], &b->srcs[0], inputs, shift, vf, af, sf, cut))
+      return 0;
+    cut->sf = arena_strndup(m->arena, sf, strlen(sf));
+    if (cut->sf == NULL)
+      return diag_fail(m->diag, "OOM", NULL, "no memory for the chain of %s", entry);
+    int audio = b->srcs[k].as >= 0;
+    if (fc != NULL && !(put(fc, &fn, "[%u:v]%s[v%u];", k, vf, k) && (!audio || put(fc, &fn, "[%u:a]%s[a%u];", k, af, k))))
+      return diag_fail(m->diag, "MEDIA_LIMIT", entry, "a filter chain is longer than %u bytes", FILTER_MAX);
+  }
+  /* The concat filter gives a one frame video segment the end 0 (D-M6-2),
+     so without audio the next segment would start at the same pts. */
+  for (uint32_t k = 0; k + 1u < b->plan.seg_count; k++) {
+    if (b->cuts[k].keep.lo == b->cuts[k].keep.hi && b->srcs[k].as < 0)
+      return diag_fail(m->diag, "MEDIA_TIMESTAMPS", entry, "segment %u keeps one frame and has no audio, so it has no length at the seam", k);
+  }
+  return shape_check(m, entry, &b->plan, b->srcs, inputs);
+}
+
+/* The one segment API: plan, demux and cut. A plan with a concat is refused
+   here. *STATUS is the exit status of a failure, or the input index of the
+   segment on success (the caller reads it there). */
+REVIEW_API static int prepare(Machine *m, const char *entry, char *const *inputs, int input_count, Source *src, char *vf, char *af, char *sf, Cut *cut, int *status) {
+  Build b;
   memset(src, 0, sizeof *src);
   src->vs = -1;
   src->as = -1;
-  av_log_set_level(AV_LOG_ERROR);
-  if (!plan_of(m, entry, input_count, &plan, status) || !fonts_open(m, inputs, input_count, plan.fonts, status)
-      || !source_open(m, inputs[plan.input], src, status))
+  int ok = build_prepare(m, entry, inputs, input_count, &b, vf, af, sf, NULL, status);
+  if (ok && b.plan.seg_count != 1u) {
+    *status = 1;
+    ok = diag_fail(m->diag, "MEDIA_SHAPE", entry, "this entry point takes one segment, the plan has %u", b.plan.seg_count);
+  }
+  if (!ok) {
+    build_close(&b);
     return 0;
-  *status = 1;
-  if (!cut_of(m, entry, &plan, src, inputs, vf, af, sf, cut))
-    return 0;
-  *status = (int)plan.input; /* the caller reads the input index here */
+  }
+  *src = b.srcs[0]; /* the caller closes it */
+  *cut = b.cuts[0];
+  *status = (int)b.plan.segs[0].input;
   return 1;
 }
 
@@ -745,22 +1046,52 @@ static void shell_word(FILE *out, const char *word) {
   shell_quote(out, word, PATH_BARE "=,");
 }
 
+/* One segment: `ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT`.
+   Two or more (D-M6-5): `ffmpeg -i IN0 -i IN1 ... -filter_complex FC -map
+   [v] [-map [a]] -fps_mode passthrough OUT`, where FC holds the chain of
+   each segment and `[v0][a0]...concat=n=K:v=1:a=1[v][a]` (a=0 and no audio
+   labels without audio). */
 int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_count, const char *out_path, FILE *out) {
-  Source src;
-  Cut cut;
+  Build b;
   int status = 1;
   char vf[FILTER_MAX];
   char af[FILTER_MAX];
   char sf[FILTER_MAX];
-  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, sf, &cut, &status);
+  char fc[FILTER_MAX];
+  int ok = build_prepare(m, entry, inputs, input_count, &b, vf, af, sf, fc, &status);
+  uint32_t count = b.plan.seg_count;
+  int audio = ok && b.srcs[0].as >= 0;
+  size_t fn = ok ? strlen(fc) : 0;
+  if (ok && count > 1u) {
+    for (uint32_t k = 0; ok && k < count; k++)
+      ok = audio ? put(fc, &fn, "[v%u][a%u]", k, k) : put(fc, &fn, "[v%u]", k);
+    ok = ok && put(fc, &fn, "concat=n=%u:v=1:a=%d[v]%s", count, audio, audio ? "[a]" : "");
+    if (!ok)
+      diag_fail(m->diag, "MEDIA_LIMIT", entry, "a filter chain is longer than %u bytes", FILTER_MAX);
+  }
   if (ok) {
-    fputs("ffmpeg -i ", out);
-    shell_path(out, inputs[status]);
-    fputs(" -vf ", out);
-    shell_word(out, vf);
-    if (src.as >= 0) {
-      fputs(" -af ", out);
-      shell_word(out, af);
+    fputs("ffmpeg", out);
+    for (uint32_t k = 0; k < count; k++) {
+      fputs(" -i ", out);
+      shell_path(out, inputs[b.plan.segs[k].input]);
+    }
+    if (count == 1u) {
+      fputs(" -vf ", out);
+      shell_word(out, vf);
+      if (audio) {
+        fputs(" -af ", out);
+        shell_word(out, af);
+      }
+    } else {
+      fputs(" -filter_complex ", out);
+      shell_word(out, fc);
+      fputs(" -map ", out);
+      shell_word(out, "[v]");
+      if (audio) {
+        fputs(" -map ", out);
+        shell_word(out, "[a]");
+      }
+      fprintf(out, " -enc_time_base:v %d:%d", b.srcs[0].fr.den, b.srcs[0].fr.num);
     }
     fputs(" -fps_mode passthrough ", out);
     shell_path(out, out_path);
@@ -771,7 +1102,7 @@ int media_ffmpeg(Machine *m, const char *entry, char *const *inputs, int input_c
       ok = 0;
     }
   }
-  source_close(&src);
+  build_close(&b);
   return ok ? 0 : status;
 }
 
@@ -850,8 +1181,8 @@ static const char *graph_open(Enc *e, const Source *s, const char *chain) {
   int ok = e->graph != NULL && outs != NULL && ins != NULL && par != NULL;
   if (ok) {
     par->format = dec->pix_fmt;
-    par->time_base = av_inv_q(s->fr);
-    par->frame_rate = s->fr;
+    par->time_base = av_inv_q(e->fr);
+    par->frame_rate = e->fr;
     par->width = dec->width;
     par->height = dec->height;
     /* Container SAR can be known when the decoder has no SAR (e.g. FFV1). */
@@ -928,37 +1259,62 @@ static int graph_switch(Enc *e, uint64_t mask) {
   return e->chain[0] == '\0' || graph_open(e, e->src, e->chain) == NULL ? 0 : AVERROR(EINVAL);
 }
 
-/* Opens the decoders, the graph, the encoders, the muxer and the output file.
-   Returns NULL, or the reason of the failure. */
-static const char *enc_open(Enc *e, const Source *s, const char *path, const char *io_path) {
-  if (avformat_alloc_output_context2(&e->oc, NULL, NULL, path) < 0 || e->oc == NULL)
-    return "no muxer for the output name";
+/* The state of one segment (D-M6-7, D-M6-8): its source S and cut, its own
+   decoders and decode window, a fresh audio clock, and its video end on the
+   concat clock: the last kept pts times n/(n - 1) for n kept frames (the mean
+   rate rule of the concat filter, P-M6-1), 0 for one frame. Returns NULL,
+   or the reason of the failure. */
+static const char *segment_open(Enc *e, const Source *s, const Cut *cut) {
+  uint64_t n = cut->keep.hi - cut->keep.lo + 1u;
+  avcodec_free_context(&e->vdec);
+  avcodec_free_context(&e->adec);
+  e->src = s;
+  e->cut = *cut;
+  e->window = decode_window(s, cut->keep);
+  e->position = e->window.start;
+  e->seen = 0;
+  e->astarted = 0;
+  e->adelta = AV_NOPTS_VALUE;
+  e->anext = AV_NOPTS_VALUE;
+  e->ashift = s->as < 0 || s->fmt->start_time == AV_NOPTS_VALUE ? 0
+    : av_rescale_q(-s->fmt->start_time, AV_TIME_BASE_Q, s->fmt->streams[s->as]->time_base);
+  e->vend_us = n >= 2u ? av_rescale(rel_us(s, cut->keep.lo, cut->keep.hi), (int64_t)n, (int64_t)n - 1) : 0;
+  e->aend_us = 0;
   e->vdec = open_decoder(s->fmt->streams[s->vs]);
   e->adec = s->as < 0 ? NULL : open_decoder(s->fmt->streams[s->as]);
   if (e->vdec == NULL || (s->as >= 0 && e->adec == NULL))
     return "cannot open a decoder";
   /* Preserve container SAR when the first frame has no active text graph. */
   e->vdec->sample_aspect_ratio = av_guess_sample_aspect_ratio(s->fmt, s->fmt->streams[s->vs], NULL);
+  return NULL;
+}
+
+/* Opens the first segment, its graph, the encoders, the muxer and the output
+   file. Returns NULL, or the reason of the failure. */
+static const char *enc_open(Enc *e, const Source *s, const Cut *cut, const char *path, const char *io_path) {
+  if (avformat_alloc_output_context2(&e->oc, NULL, NULL, path) < 0 || e->oc == NULL)
+    return "no muxer for the output name";
+  e->fr = s->fr;
+  e->last_pts = INT64_MIN;
+  const char *why = segment_open(e, s, cut);
+  if (why != NULL)
+    return why;
   e->mask = mask_at(&e->cut, e->cut.keep.lo);
   if (!chain_of(&e->cut, e->mask, e->chain))
     return "a filter chain is too long";
-  const char *why = e->chain[0] == '\0' ? NULL : graph_open(e, s, e->chain);
+  why = e->chain[0] == '\0' ? NULL : graph_open(e, s, e->chain);
   if (why != NULL)
     return why;
-  e->venc = open_encoder(e->oc, AVMEDIA_TYPE_VIDEO, path, e->vdec, e->bsink, s->fr);
-  e->aenc = e->adec == NULL ? NULL : open_encoder(e->oc, AVMEDIA_TYPE_AUDIO, path, e->adec, NULL, s->fr);
+  e->venc = open_encoder(e->oc, AVMEDIA_TYPE_VIDEO, path, e->vdec, e->bsink, e->fr);
+  e->aenc = e->adec == NULL ? NULL : open_encoder(e->oc, AVMEDIA_TYPE_AUDIO, path, e->adec, NULL, e->fr);
   if (e->venc == NULL || (e->adec != NULL && e->aenc == NULL))
     return "cannot open an encoder";
   e->vst = add_stream(e->oc, e->venc);
   e->ast = e->aenc == NULL ? NULL : add_stream(e->oc, e->aenc);
   if (e->vst == NULL || (e->aenc != NULL && e->ast == NULL))
     return "cannot add an output stream";
-  e->vst->avg_frame_rate = s->fr;
+  e->vst->avg_frame_rate = e->fr;
   if (e->aenc != NULL) {
-    e->adelta = AV_NOPTS_VALUE;
-    e->anext = AV_NOPTS_VALUE;
-    e->ashift = s->fmt->start_time == AV_NOPTS_VALUE ? 0
-      : av_rescale_q(-s->fmt->start_time, AV_TIME_BASE_Q, s->fmt->streams[s->as]->time_base);
     int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
     e->fifo = av_audio_fifo_alloc(e->aenc->sample_fmt, e->aenc->ch_layout.nb_channels, size);
     e->audio_times = av_fifo_alloc2(8, sizeof(AudioSpan), AV_FIFO_FLAG_AUTO_GROW);
@@ -1038,8 +1394,10 @@ static int filter_frame(Enc *e, AVFrame *f) {
 /* The frame F out of the decoder must have the pts of the next position
    (D-M5-2). Each kept frame gets the source timing (O-2, M4-R2,
    setpts=PTS-STARTPTS and -fps_mode passthrough): its pts relative to the
-   first kept frame and its own duration, both in the encoder time base. Then
-   it goes through the graph of its active burns, if any. */
+   first kept frame and its own duration, both in the encoder time base. With
+   2+ segments both go through the concat clock 1/1000000 and the pts starts
+   at the seam (D-M6-2, D-M6-8); a pts at or under the last one is a
+   collision. Then it goes through the graph of its active burns, if any. */
 static int video_frame(Enc *e, AVFrame *f) {
   uint64_t p = e->position;
   if (f->pts != e->src->vpts[p]) {
@@ -1051,8 +1409,20 @@ static int video_frame(Enc *e, AVFrame *f) {
   if (p < e->cut.keep.lo)
     return 0;
   uint64_t mask = mask_at(&e->cut, p);
-  f->pts = out_pts(e->src, e->cut.keep.lo, p);
-  f->duration = out_duration(e->src, f->duration);
+  if (e->concat) {
+    AVRational tb = e->src->fmt->streams[e->src->vs]->time_base;
+    f->pts = round_pts(rel_us(e->src, e->cut.keep.lo, p) + e->delta_us, AV_TIME_BASE_Q, e->fr);
+    f->duration = llrint((double)av_rescale_q(f->duration, tb, AV_TIME_BASE_Q) * av_q2d(AV_TIME_BASE_Q) / av_q2d(av_inv_q(e->fr)));
+  } else {
+    f->pts = out_pts(e->src, e->cut.keep.lo, p);
+    f->duration = out_duration(e->src, f->duration);
+  }
+  if (f->pts <= e->last_pts) {
+    e->collided = 1;
+    e->collide_at = p;
+    return AVERROR_INVALIDDATA;
+  }
+  e->last_pts = f->pts;
   f->time_base = e->venc->time_base;
   int r = mask == e->mask ? 0 : graph_switch(e, mask);
   return r < 0 ? r : e->graph == NULL ? video_out(e, f) : filter_frame(e, f);
@@ -1071,7 +1441,9 @@ static int video_frames(Enc *e) {
 
 /* The pts of the first of N buffered samples. A chunk can cross a source
    timestamp gap; its pts follows its first sample, as the CLI buffersink
-   does. Keep the next span's timing when a later chunk starts inside it. */
+   does. Keep the next span's timing when a later chunk starts inside it. On
+   the concat clock a partial take moves the span by its samples in
+   1/1000000, as ff_framequeue_skip_samples does at each take. */
 static int audio_pts(Enc *e, int n, int64_t *pts) {
   int first = 1;
   while (n > 0) {
@@ -1087,7 +1459,7 @@ static int audio_pts(Enc *e, int n, int64_t *pts) {
       first = 0;
     }
     int take = n < e->aremaining ? n : e->aremaining;
-    e->apts += take;
+    e->apts += e->concat ? av_rescale_q(take, e->aenc->time_base, AV_TIME_BASE_Q) : take;
     e->aremaining -= take;
     n -= take;
   }
@@ -1106,15 +1478,30 @@ static int audio_chunk(Enc *e, int n) {
     return AVERROR(ENOMEM);
   if (av_audio_fifo_read(e->fifo, (void **)f->extended_data, n) != n)
     return AVERROR(EIO);
-  if (audio_pts(e, n, &f->pts) < 0)
+  int64_t pts = 0;
+  if (audio_pts(e, n, &pts) < 0)
     return AVERROR(EIO);
+  /* On the concat clock the pts comes back to 1/sample_rate as fftools
+     rescales it for the encoder. */
+  f->pts = e->concat ? av_rescale_q(pts, AV_TIME_BASE_Q, e->aenc->time_base) : pts;
   f->duration = n;
   f->time_base = e->aenc->time_base;
   return send(e, e->aenc, e->ast, f);
 }
 
+/* Encodes every full frame of the FIFO. */
+static int audio_full(Enc *e) {
+  int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
+  int r = 0;
+  while (r >= 0 && av_audio_fifo_size(e->fifo) >= size)
+    r = audio_chunk(e, size);
+  return r;
+}
+
 /* Keeps the samples of F inside [astart, aend) (counted from the first
-   decoded sample, P7) and encodes every full frame. */
+   decoded sample, P7) and encodes every full frame. With 2+ segments the
+   span goes on the concat clock: its pts in 1/1000000 plus the seam, and the
+   audio end of the segment moves to its end (the concat filter push_frame). */
 static int audio_keep(Enc *e, const AVFrame *f) {
   int64_t lo = e->seen;
   int64_t hi = e->seen + f->nb_samples;
@@ -1152,13 +1539,14 @@ static int audio_keep(Enc *e, const AVFrame *f) {
     e->astarted = 1;
   }
   AudioSpan span = {pts - e->aorigin, (int)(b - a)};
+  if (e->concat) {
+    int64_t rel = av_rescale_q(span.pts, tb, AV_TIME_BASE_Q);
+    e->aend_us = rel + av_rescale_q(span.samples, tb, AV_TIME_BASE_Q);
+    span.pts = rel + e->delta_us;
+  }
   if (av_fifo_write(e->audio_times, &span, 1) < 0)
     return AVERROR(ENOMEM);
-  int size = e->aenc->frame_size > 0 ? e->aenc->frame_size : 1024;
-  int r = 0;
-  while (r >= 0 && av_audio_fifo_size(e->fifo) >= size)
-    r = audio_chunk(e, size);
-  return r;
+  return audio_full(e);
 }
 
 static int audio_frames(Enc *e) {
@@ -1170,11 +1558,59 @@ static int audio_frames(Enc *e) {
   return drained(r);
 }
 
-/* Decodes every audio packet and the video packets of the decode window in
-   file order, then flushes the decoders, the last short audio frame and the
-   encoders. The window sends no video packet after the decoder gives
-   position hi (D-M5-1); the audio decode stays whole (D-M5-3). */
-static int enc_run(Enc *e, const Source *s) {
+/* N zero samples into the FIFO as one span at PTS (the concat clock), then
+   every full frame. */
+static int silence(Enc *e, int n, int64_t pts) {
+  AVFrame *f = e->frame;
+  av_frame_unref(f);
+  f->nb_samples = n;
+  f->format = e->aenc->sample_fmt;
+  f->sample_rate = e->aenc->sample_rate;
+  if (av_channel_layout_copy(&f->ch_layout, &e->aenc->ch_layout) < 0 || av_frame_get_buffer(f, 0) < 0)
+    return AVERROR(ENOMEM);
+  if (av_samples_set_silence(f->extended_data, 0, n, f->ch_layout.nb_channels, f->format) < 0)
+    return AVERROR(EINVAL);
+  int written = av_audio_fifo_write(e->fifo, (void **)f->extended_data, n);
+  av_frame_unref(f);
+  if (written < n)
+    return AVERROR(ENOMEM);
+  AudioSpan span = {pts, n};
+  if (av_fifo_write(e->audio_times, &span, 1) < 0)
+    return AVERROR(ENOMEM);
+  return audio_full(e);
+}
+
+/* The end of a segment that another one follows (D-M6-2, the concat filter
+   flush_segment): the seam is the maximum of the video end and the audio
+   end of the segment on the concat clock; the audio gets silence up to the
+   seam (send_silence: frames of max(9600, rate/5) zero samples, each with
+   its own pts); the next segment starts at the seam. */
+static int seam(Enc *e) {
+  int64_t delta = e->vend_us;
+  int r = 0;
+  if (e->aenc != NULL) {
+    AVRational rate = e->aenc->time_base;
+    int frame = 9600 > e->aenc->sample_rate / 5 ? 9600 : e->aenc->sample_rate / 5;
+    int64_t sent = 0;
+    delta = e->aend_us > delta ? e->aend_us : delta;
+    int64_t left = av_rescale_q(delta - e->aend_us, AV_TIME_BASE_Q, rate);
+    while (r >= 0 && left > 0) {
+      int n = left < frame ? (int)left : frame;
+      r = silence(e, n, e->aend_us + e->delta_us + av_rescale_q(sent, rate, AV_TIME_BASE_Q));
+      sent += n;
+      left -= n;
+    }
+  }
+  e->delta_us += delta;
+  return r;
+}
+
+/* Decodes every audio packet and the video packets of the decode window of
+   the current segment in file order, then flushes the decoders. The window
+   sends no video packet after the decoder gives position hi (D-M5-1); the
+   audio decode stays whole (D-M5-3). LAST also drains the graph, between
+   the two flushes. */
+static int enc_segment(Enc *e, const Source *s, int last) {
   int r = 0;
   for (size_t i = 0; r >= 0 && i < s->pkt_count; i++) {
     int video = s->pkts[i]->stream_index == s->vs;
@@ -1185,12 +1621,16 @@ static int enc_run(Enc *e, const Source *s) {
   }
   if (r >= 0 && (r = avcodec_send_packet(e->vdec, NULL)) >= 0)
     r = video_frames(e);
-  if (r >= 0 && e->graph != NULL)
+  if (r >= 0 && last && e->graph != NULL)
     r = filter_frame(e, NULL);
   if (r >= 0 && e->adec != NULL && (r = avcodec_send_packet(e->adec, NULL)) >= 0)
     r = audio_frames(e);
-  if (r >= 0 && e->aenc != NULL && av_audio_fifo_size(e->fifo) > 0)
-    r = audio_chunk(e, av_audio_fifo_size(e->fifo));
+  return r;
+}
+
+/* The last short audio frame and the encoder flushes. */
+static int enc_finish(Enc *e) {
+  int r = e->aenc != NULL && av_audio_fifo_size(e->fifo) > 0 ? audio_chunk(e, av_audio_fifo_size(e->fifo)) : 0;
   if (r >= 0)
     r = send(e, e->venc, e->vst, NULL);
   if (r >= 0 && e->aenc != NULL)
@@ -1198,7 +1638,11 @@ static int enc_run(Enc *e, const Source *s) {
   return r;
 }
 
-static int encode(Machine *m, const Source *s, const Cut *cut, const char *path) {
+/* Encodes COUNT segments (one source and one cut each) to PATH through a
+   temporary name: one muxer and one encoder pair, the segments in order
+   (D-M6-8), each with its own decoders and decode window, the seam of
+   D-M6-2 between them. */
+static int encode_all(Machine *m, const Source *srcs, const Cut *cuts, uint32_t count, const char *path) {
   size_t size = strlen(path) + sizeof ".XXXXXX";
   char *temporary = malloc(size);
   if (temporary == NULL)
@@ -1216,46 +1660,75 @@ static int encode(Machine *m, const Source *s, const Cut *cut, const char *path)
   }
   Enc e;
   memset(&e, 0, sizeof e);
-  e.cut = *cut;
-  e.src = s;
-  e.window = decode_window(s, cut->keep);
-  e.position = e.window.start;
-  const char *why = enc_open(&e, s, path, temporary);
-  if (why == NULL && enc_run(&e, s) < 0 && !e.skewed)
+  e.concat = count > 1u;
+  const char *why = enc_open(&e, &srcs[0], &cuts[0], path, temporary);
+  uint32_t k = 0;
+  int r = 0;
+  int ended = 0; /* the decode of segment k ended before its position hi */
+  while (why == NULL && r >= 0 && !ended && k < count) {
+    if (k > 0) {
+      why = segment_open(&e, &srcs[k], &cuts[k]);
+      r = why == NULL ? graph_switch(&e, mask_at(&e.cut, e.cut.keep.lo)) : 0;
+    }
+    if (why == NULL && r >= 0)
+      r = enc_segment(&e, &srcs[k], k + 1u == count);
+    /* The decode gave each position of [lo, hi], each with its pts (D-M5-2). */
+    ended = why == NULL && r >= 0 && e.position <= e.cut.keep.hi;
+    if (why == NULL && r >= 0 && !ended) {
+      r = k + 1u < count ? seam(&e) : enc_finish(&e);
+      k++;
+    }
+  }
+  if (r < 0 && why == NULL && !e.skewed && !e.collided)
     why = "an encode step failed";
-  if (why == NULL && !e.skewed && av_write_trailer(e.oc) < 0)
+  int done = why == NULL && r >= 0 && !ended;
+  if (done && av_write_trailer(e.oc) < 0)
     why = "cannot write the container trailer";
-  /* The decode gave each position of [lo, hi], each with its pts (D-M5-2). */
-  int count_ok = why != NULL || (!e.skewed && e.position > cut->keep.hi);
+  const Source *s = &srcs[k < count ? k : 0];
   int skewed = e.skewed;
+  int collided = e.collided;
   int64_t got = e.skew_pts;
-  uint64_t decoded = e.position;
+  int64_t last = e.last_pts;
+  uint64_t at = collided ? e.collide_at : e.position;
+  uint64_t hi = e.cut.keep.hi;
+  AVRational fr = e.fr;
+  char where[40];
+  where[0] = '\0';
+  if (count > 1u)
+    snprintf(where, sizeof where, "segment %u, ", k);
   if (enc_free(&e) < 0 && why == NULL)
     why = "cannot close the output file";
-  if (why == NULL && count_ok && rename(temporary, path) != 0)
+  if (why == NULL && done && rename(temporary, path) != 0)
     why = "cannot replace the output file";
   remove(temporary);
   free(temporary);
   if (why != NULL)
     return diag_fail(m->diag, "MEDIA_ENCODE", NULL, "%s: %s", path, why) + 2;
-  if (!count_ok && skewed)
-    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "position %llu: the decoded frame has pts %lld, the index has %lld",
-                     ULL(decoded), (long long)got, (long long)s->vpts[decoded]) + 1;
-  if (!count_ok)
-    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "the decode ended before position %llu, the cut ends at %llu",
-                     ULL(decoded), ULL(cut->keep.hi)) + 1;
+  if (skewed)
+    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "%sposition %llu: the decoded frame has pts %lld, the index has %lld",
+                     where, ULL(at), (long long)got, (long long)s->vpts[at]) + 1;
+  if (collided)
+    return diag_fail(m->diag, "MEDIA_TIMESTAMPS", NULL, "%sposition %llu rounds to the pts %lld of the frame before it at the frame rate %d/%d",
+                     where, ULL(at), (long long)last, fr.num, fr.den) + 1;
+  if (!done)
+    return diag_fail(m->diag, "MEDIA_DECODE", NULL, "%sthe decode ended before position %llu, the cut ends at %llu",
+                     where, ULL(at), ULL(hi)) + 1;
   return 0;
 }
 
+/* The one segment API. */
+REVIEW_API static int encode(Machine *m, const Source *s, const Cut *cut, const char *path) {
+  return encode_all(m, s, cut, 1u, path);
+}
+
 int media_build(Machine *m, const char *entry, char *const *inputs, int input_count, const char *out_path) {
-  Source src;
-  Cut cut;
+  Build b;
   int status = 1;
   char vf[FILTER_MAX];
   char af[FILTER_MAX];
   char sf[FILTER_MAX];
-  int ok = prepare(m, entry, inputs, input_count, &src, vf, af, sf, &cut, &status);
-  int result = ok ? encode(m, &src, &cut, out_path) : status;
-  source_close(&src);
+  int ok = build_prepare(m, entry, inputs, input_count, &b, vf, af, sf, NULL, &status);
+  int result = ok ? encode_all(m, b.srcs, b.cuts, b.plan.seg_count, out_path) : status;
+  build_close(&b);
   return result;
 }
