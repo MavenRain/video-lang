@@ -63,9 +63,34 @@ rounding; a gap starts a new sample clock. The host refuses missing video
 pts, duplicate pts, no positive rate, or kept pts that collide after
 rounding (`MEDIA_TIMESTAMPS`).
 
-`langc ffmpeg` prints one ffmpeg command for the same plan: a `-vf` chain
-of `trim`, `scale`, `crop`, `pad` and `drawtext` filters, and a `-af`
-chain, with `-fps_mode passthrough`. The gate runs this command with the
+With `concat` the plan is a list of segments, each a chain of steps over
+one input (at most 64 segments and 64 steps over all segments). A step
+after a `concat` is pushed into each segment: a `trim` or a `burnText`
+entry splits at the segment lengths, so `trim (interval 40 60) (concat a
+b)` keeps positions 40 to 49 of `a` and 0 to 10 of `b` when `a` has 50
+frames. The operands of a `concat` must agree in frame size (after the
+steps under the `concat`), pixel format, audio presence, sample rate and
+channel layout; sample aspect ratios must agree when both are known
+(`CONCAT_SHAPE`). ffmpeg converts
+the rate and the channels itself, so this refusal is stricter than the
+reference. Different frame rates are accepted; the output keeps the time
+base `1/fr` of the first segment. The encode runs the segments in order
+with one encoder pair. Each segment's length is the maximum of its audio
+end and video mean rate end in 1/1000000. These lengths accumulate on that
+clock to give each seam. Video pts round to `1/fr`; audio pts round to
+`1/sample_rate`. Silence fills short audio up to the unrounded seam, and
+the next segment starts from it (D-M6-2, D-M6-8). The same file in
+two segments opens twice. An empty segment is `EMPTY_VIDEO` (D-M6-6). A
+segment of one frame without audio that is not last is `MEDIA_TIMESTAMPS`.
+
+`langc ffmpeg` prints one ffmpeg command for the same plan: for one
+segment a `-vf` chain of `trim`, `scale`, `crop`, `pad` and `drawtext`
+filters, and a `-af` chain, with `-fps_mode passthrough`. For two or more
+segments it prints one `-i` for each segment and a `-filter_complex`
+graph: the chains of each segment, then the `concat` filter with `n`
+segments (`v=1`, and `a=1` when the inputs have audio). It also prints
+`-enc_time_base:v FR_DEN:FR_NUM` to preserve the first segment's `1/fr`
+encoder grid for mixed frame rates. The gate runs this command with the
 ffmpeg of `FFMPEG_PREFIX`. Then
 it compares the decoded frames of the two outputs with framemd5 over all
 the streams (ruling R1). `SPEC.md` section 7 lists the media refusal codes.
@@ -160,10 +185,11 @@ executable at build time. `domain/README.md` tells how to change them.
 |---|---|---|
 | Source size | 1 MiB | `src/front/front.h:7` |
 | Arena | 1 GiB | `src/main.c:11` |
-| Media plan steps | 64 | `src/media.c:34` |
-| Text entries in all `burnText` steps | 64 | `src/media.c:35` |
-| Entry parameters | 64 | `src/media.c:36` |
-| ffmpeg filter chain text | 65536 bytes | `src/media.c:37` |
+| Media plan steps, over all segments | 64 | `src/media.c:40` |
+| Media plan segments | 64 | `src/media.c:41` |
+| Text entries in all `burnText` steps | 64 | `src/media.c:42` |
+| Entry parameters | 64 | `src/media.c:43` |
+| ffmpeg filter chain text | 65536 bytes | `src/media.c:44` |
 | Parser nesting | 1000 | `src/front/parser.c:16` |
 | Checker depth | 2000 | `src/front/check.c:10` |
 | Evaluator depth | 2000 | `src/front/core.h:16` |

@@ -13,7 +13,7 @@ Note (ruling M3-R4): the gate refuses dashes in every file, thus ` - ` replaces 
 
 ---
 
-# video-lang denotational design (USER, verbatim, 2026-10-10)
+# video-lang denotational design (USER, verbatim, 2026-10-10; Concatenation 2026-10-12)
 
 Source of truth for the domain types and operations. The language gets the lang-template formers plus ONLY these types and operations (USER: "based on lang-template and additionally only the types and operations from the following denotational design").
 
@@ -77,6 +77,30 @@ All operations remain pure functions. Their meanings are expressed by equational
     overlayText style (track p) (μ(v)(p))
   ```
   Donation alerts and watermarks are the same operation restricted to a sub-interval or to a constant overlay. Because the overlay is pointwise, `burnText` also commutes with `trim` and with spatial filters that do not depend on the text.
+
+- **Concatenation**
+  ```
+  concat : Video → Video → Video
+  μ(concat a b)(p) =
+    if p < |a| then a[p] else b[p - |a|]
+  ```
+  where |v| is the length of v (the size of its domain) and v[k] is the
+  frame of rank k in v, that is μ(v)(min(dom v) + k). The result is the
+  sequence a followed by b; its positions are the ranks 0, 1, ..., |a| + |b| - 1.
+  The audio follows the frames: the audio of a, then the audio of b.
+
+  In the list presentation, concatenation is associative, every frame map
+  that does not read the position distributes over it, and restriction
+  splits at the seam, each side in the positions of its own operand:
+  ```
+  concat (concat a b) c = concat a (concat b c)
+  scale r (concat a b) = concat (scale r a) (scale r b)
+  trim (lo, hi) (concat a b) =
+    concat (trim (lo + a₀, hi + a₀) a) (trim (lo - |a| + b₀, hi - |a| + b₀) b)
+  ```
+  (the same for crop and pad; a₀ = min(dom a), b₀ = min(dom b); a side
+  whose interval misses its operand is the empty video). burnText does
+  not distribute: its track is indexed by the positions of the result.
 
 - **Sequential composition**
   Filters still form a monoid under ordinary function composition:

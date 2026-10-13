@@ -34,7 +34,7 @@ this repository.
   `test/parse/expect.txt`).
 - `Video` and `Font` values come only from the inputs of a media entry.
   A media entry returns `Video`; each parameter has type `Video` or
-  `Font` (`MEDIA_TYPE`, `src/media.c:267`).
+  `Font` (`MEDIA_TYPE`, `src/media.c:401`).
 
 ## Limits
 
@@ -49,11 +49,12 @@ this repository.
   limit of 1 GiB (`src/main.c:11`). A run that reaches it stops with
   `OOM`. The libav* libraries take their memory outside the arena.
 - Source files are at most 1 MiB (`src/front/front.h:7`).
-- A media program has at most 64 steps, 64 entry parameters and a filter
-  chain of at most 65536 bytes (`src/media.c:34-37`, refusal `MEDIA_LIMIT`).
+- A media program has at most 64 steps over all segments, 64 segments, 64
+  entry parameters and a filter chain of at most 65536 bytes
+  (`src/media.c:40-44`, refusal `MEDIA_LIMIT`).
   A media plan has at most 64 text entries in total across all
   `burnText` steps, because the build keeps the active entries in one
-  64-bit mask (`src/media.c:219`, refusal `TEXT_LIMIT`).
+  64-bit mask (`src/media.c:266`, refusal `TEXT_LIMIT`).
 - At 1080p, the peak resident memory of a build was 873 MB to 936 MB for
   250 to 1500 frames (`make perf`, `probe/CAPABILITY.md` section 6).
 
@@ -66,26 +67,39 @@ this repository.
   (`src/json.h:15`).
 - `langc build PROG MAIN IN... -o OUT` writes a media file. It writes a
   temporary file first and renames it to OUT only when the build succeeds
-  (`src/media.c:1231`). The encoders are the defaults of the container
-  (`src/media.c:794`). Constant and variable frame rate video is accepted.
+  (`src/media.c:1701`). The encoders are the defaults of the container
+  (`src/media.c:1129`). Constant and variable frame rate video is accepted.
   Pts keep source timing relative to the first kept frame, rounded to
   `1/fr`; the last frame keeps its own duration. Audio keeps timestamp
   gaps relative to the first kept sample. Like the ffmpeg CLI, the host
   subtracts the container start time from audio pts before the sample
-  rounding; a gap starts a new sample clock (`src/media.c:1114`).
+  rounding; a gap starts a new sample clock (`src/media.c:1505`).
   Missing video pts, duplicate pts, no positive rate, and kept pts that
   collide after rounding are `MEDIA_TIMESTAMPS` refusals
-  (`src/media.c:351`, `:687`).
+  (`src/media.c:461`, `:837`).
 - The video decode of a cut starts at the last decode key at or before the
   first kept position that splits presentation order, or at packet 0 if
   none exists (for H.264, the key must be an IDR picture; `SPEC.md` O-3,
-  `src/media.c:442`, `:477`). It sends no video packet after the decoder
-  gives the last kept position (`src/media.c:1177`). The audio decode is
+  `src/media.c:563`, `:598`). It sends no video packet after the decoder
+  gives the last kept position (`src/media.c:1617`). The audio decode is
   whole. A frame from the selected start through the last kept position
   with a pts that differs from the index is a `MEDIA_DECODE` refusal
-  (`src/media.c:1238`). Buffered frames emitted afterward are discarded
-  without a pts check (`src/media.c:1059`).
+  (`src/media.c:1708`). Buffered frames emitted afterward are discarded
+  without a pts check (`src/media.c:1433`).
+- `concat` makes the plan a list of segments (`src/media.c:386`). The
+  operands must agree in frame size, pixel format, audio presence, sample
+  rate and channel layout; sample aspect ratios must agree when both are
+  known (`CONCAT_SHAPE`,
+  `src/media.c:887`); ffmpeg converts the rate and the channels itself, so
+  the refusal is stricter than the reference (P-M6-2). The encode runs the
+  segments in order with one encoder pair (`src/media.c:1645`). The seam
+  is accumulated in 1/1000000 using the maximum of each preceding
+  segment's audio end and video mean rate end. Video pts round to `1/fr`
+  of the first segment; audio pts round to `1/sample_rate`. Silence fills
+  short audio up to the unrounded seam (`src/media.c:1588`, P-M6-1).
 - `langc ffmpeg PROG MAIN IN... -o OUT` prints the ffmpeg command for the
   same program with `-fps_mode passthrough`, and that command writes OUT
-  (`src/media.c:744`). The decoded frames of the two outputs are equal in
-  all 50 media R1 gate cases, over all streams.
+  (`src/media.c:1054`); with two or more segments it is the
+  `-filter_complex` form with the `concat` filter. The decoded frames of
+  the two outputs are equal in all 60 media R1 gate cases, over all
+  streams.

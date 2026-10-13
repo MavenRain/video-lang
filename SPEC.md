@@ -76,7 +76,7 @@ at check time when the field is a literal, and at evaluation otherwise
 (`src/front/check.c:899-904`).
 
 A media entry returns `Video`. Each parameter has type `Video` or `Font`
-(`MEDIA_TYPE`, `src/media.c:267-279`). The command line binds IN... to the
+(`MEDIA_TYPE`, `src/media.c:401-413`). The command line binds IN... to the
 parameters in order (`MEDIA_ARGS`). A program contains no file path (O-1).
 
 ## 3. Type formers
@@ -108,7 +108,7 @@ table gives the restrictions that the status cells name.
 
 | Type | Meaning (design label) | Definition |
 |---|---|---|
-| `Video` | Frames at positions, with optional audio (Basic types; ruling R3) | Primitive (`src/front/check.c:127`). A value comes only from an entry input. Probe-forced: the build keeps the demuxed packets and a position index, not the decoded frames (O-3) |
+| `Video` | Frames at positions, with optional audio (Basic types; ruling R3) | Primitive (`src/front/check.c:127`). A value comes only from an entry input. Probe-forced: the build keeps the demuxed packets and a position index, not the decoded frames (O-3). A `concat` result keeps the packets of each operand (D-M6-7) |
 | `Position` | The presentation rank of a frame (Basic types) | `def Position : Type 0 := Nat` (`domain/domain.lang:23`). Positions are absolute (D2) |
 | `Interval` | The positions from `lo` to `hi`, both included (Basic types) | Primitive `interval lo hi` (`src/front/check.c:128-129`). `INTERVAL_RANGE` when `lo > hi` |
 | `Resolution` | An output width and height (Spatial scale) | Primitive `res w h` (`src/front/check.c:133`). `FRAME_SIZE`: each value is even, from 2 to 16384 |
@@ -135,28 +135,40 @@ table gives the restrictions that the status cells name.
 | `pad` | `PadSpec -> Video -> Video` | Puts each frame on a larger frame of one color (ruling R4) |
 | `style` | `Font -> Nat -> Nat -> Nat -> Nat -> Style` | A text style (Text / subtitle burn-in) |
 | `burnText` | `Style -> List (Prod Interval Text) -> Video -> Video` | Draws each entry on the frames of its interval. Entries draw in list order (P14) (Text / subtitle burn-in) |
+| `concat` | `Video -> Video -> Video` | The first video followed by the second. The positions of the result are its ranks: `p < |a|` is frame `p` of `a`, else frame `p - |a|` of `b`. The audio follows the frames (Concatenation; M6-R2) |
 | `idFilter` | `Filter` | The identity (Sequential composition) |
 | `compose` | `(f : Filter) -> (g : Filter) -> Filter` | `f` after `g` (Sequential composition) |
 
 `scale`, `crop`, `pad` and `burnText` do not change the audio (ruling R3).
+`concat` joins the audio of its operands in order (D-M6-1). `concat` is
+associative; `scale`, `crop` and `pad` distribute over it; `trim` splits at
+the seam; `burnText` does not distribute (D-M6-4). The compiler never
+rewrites a program by these laws (D1); the gate tests them by evaluation.
 `encode` is not an operation: the `build` command encodes (O-1, O-5). These
 design items are not in the language: `Frame` (a value of the runtime
 only), the composition of two resolutions (D1), an encode specification
-(O-5), concatenation and audio operations.
+(O-5) and audio operations.
 
 ## 7. Target and instance encoding
 
-`langc build PROG MAIN IN... -o OUT` evaluates MAIN to a chain of steps
-over one input. It runs the steps in process with the FFmpeg libraries and
+`langc build PROG MAIN IN... -o OUT` evaluates MAIN to a list of segments,
+each a chain of steps over one input; a program without `concat` is one
+segment (D-M6-5). It runs the steps in process with the FFmpeg libraries and
 encodes with the default encoders of the container, libx264 and aac for
 `.mp4` (O-5). It writes a temporary file and renames it to OUT only when
-the encode succeeds (`src/media.c:1197`, `:1231`). Positions start again
+the encode succeeds (`src/media.c:1645`, `:1701`). Positions start again
 from 0 at encode (O-2). The video keeps the source timing relative to its
-first kept frame, rounded to the encoder time base (M4-R2). An output with
-no frame is a refusal, and no file is written (D3). `langc ffmpeg` prints
-`ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT` for the same
-program (`src/media.c:744`). The proofs and the types erase:
-only the steps reach the output.
+first kept frame, rounded to the encoder time base (M4-R2); at a `concat`
+seam the pts continue from the end of the segment before it (D-M6-2). An
+output with no frame is a refusal, and no file is written (D3). `langc
+ffmpeg` prints `ffmpeg -i IN -vf VF [-af AF] -fps_mode passthrough OUT` for
+one segment, and for K segments `ffmpeg -i IN0 -i IN1 ... -filter_complex
+'[0:v]VF0[v0];[0:a]AF0[a0];...[v0][a0][v1][a1]concat=n=K:v=1:a=1[v][a]' -map
+'[v]' -map '[a]' -enc_time_base:v FR_DEN:FR_NUM -fps_mode passthrough OUT`
+(`a=0` and no audio labels when the inputs have no audio). `FR_NUM/FR_DEN`
+is the guessed frame rate of the first segment (`src/media.c:1054`,
+`:1094`). The proofs and the types
+erase: only the steps reach the output.
 
 The build refuses with these codes (`src/media.c`):
 
@@ -164,13 +176,14 @@ The build refuses with these codes (`src/media.c`):
 |---|---|
 | `EVAL_ENTRY` | No definition MAIN |
 | `MEDIA_TYPE`, `MEDIA_ARGS` | The entry type is wrong, or the input count is wrong |
-| `MEDIA_SHAPE` | The result is not a chain of steps over a `Video` input |
-| `MEDIA_LIMIT` | More than 64 steps or 64 entry parameters, or a filter chain above 65536 bytes |
+| `MEDIA_SHAPE` | The result is not a chain of `trim`, `scale`, `crop`, `pad`, `burnText` and `concat` over `Video` inputs |
+| `MEDIA_LIMIT` | More than 64 steps over all segments, 64 segments or 64 entry parameters, or a filter chain above 65536 bytes |
+| `CONCAT_SHAPE` | The operands of a `concat` differ in frame size, pixel format, audio presence, sample rate or channel layout, or both have known sample aspect ratios that differ (D-M6-3) |
 | `TEXT_LIMIT` | More than 64 text entries in total in the `burnText` steps |
 | `INTERVAL_ORDER` | A trim interval with `lo > hi` |
 | `MEDIA_INPUT`, `MEDIA_NO_VIDEO` | An input does not open, or has no video stream |
 | `MEDIA_FORMAT` | The video is not yuv420p, or the audio is not fltp with a positive rate |
-| `MEDIA_TIMESTAMPS` | A video frame has no pts, two video frames have the same pts, the video has no positive frame rate, or two kept frames round to one output pts (O-2) |
+| `MEDIA_TIMESTAMPS` | A video frame has no pts, two video frames have the same pts, the video has no positive frame rate, or two kept frames round to one output pts (O-2); with `concat`, a segment of one frame without audio that is not last |
 | `EMPTY_VIDEO` | No frame to encode (D3) |
 | `MEDIA_FONT` | FreeType cannot open a `Font` input |
 | `CROP_RANGE`, `PAD_RANGE` | The crop window is outside the frame, or the pad frame does not hold the frame |
@@ -206,8 +219,8 @@ These facts of `probe/CAPABILITY.md` set the design:
 
 The check on the output is the gate (`test/gate.sh`). For each media case it
 runs `langc build` and the `langc ffmpeg` command, then compares the
-framemd5 lines of the two outputs over all streams (ruling R1). Of the 16
-law rows, 14 compare the full lines and 2 compare the lines without the
+framemd5 lines of the two outputs over all streams (ruling R1). Of the 29
+law rows, 27 compare the full lines and 2 compare the lines without the
 hash column (`probe/CAPABILITY.md` section 9). There is no axiom report,
 because the compiler refuses `axiom` (section 10 of the probe).
 
@@ -241,6 +254,15 @@ because the compiler refuses `axiom` (section 10 of the probe).
   or at packet 0 if none exists (O-3). It sends no more video packets after
   the decoder gives the last kept frame. The R1 reference stays the same.
   The audio decode stays whole (D-M5-3).
+- M6-R1. RULED 2026-10-12 (USER): M6 is concatenation: the core operation
+  `concat`, a plan of segments, the encode of two or more sources and the
+  ffmpeg `concat` filter as the reference. The real world check on the raw
+  VFR recording, time based audio positions and the milestone wide mutant
+  sweep are not in M6.
+- M6-R2. RULED 2026-10-12 (USER): the `design/DESIGN.md` Concatenation
+  clause is the D-M6-1 text: `concat a b` is the sequence `a` followed by
+  `b`, the positions of the result are its ranks, and the audio follows the
+  frames.
 - D1. Probe-forced (P3): the compiler never rewrites a program by a law
   that is false on pixels. Exact laws: trim twice, trim by an intersection,
   and each operation with trim. Laws on the frame shape only: scale
@@ -249,6 +271,45 @@ because the compiler refuses `axiom` (section 10 of the probe).
   reference command converts them to relative positions.
 - D3. An empty intersection gives the empty video. Its encode is a build
   refusal (`EMPTY_VIDEO`), and no file is written.
+- D-M6-1. Default (M6-R2): `concat a b` is `a` followed by `b`. A position
+  `p < |a|` is frame `p` of `a`; `p >= |a|` is frame `p - |a|` of `b`. The
+  audio of `a`, then the audio of `b`; the last frame of `a` keeps the audio
+  of `a` to the end of its stream (O-4).
+- D-M6-2. Default: each segment's length is the maximum of its audio end
+  (the last pts plus the sample duration) and its video mean rate end
+  (the last pts times n/(n - 1) for n >= 2, or 0 for one frame), relative
+  to its start, in 1/1000000. The seam is the sum of the preceding segment
+  lengths on that clock. Video pts round to the `1/fr` encoder grid of
+  the first segment; audio pts round to `1/sample_rate`. Short audio is
+  padded with silence up to the unrounded seam (P-M6-1).
+- D-M6-3. Default: `CONCAT_SHAPE` refuses operands that differ in frame
+  size (after the steps under the `concat`), pixel format, audio presence,
+  sample rate or channel layout, or whose known sample aspect ratios
+  differ. An unknown sample aspect ratio does not cause this refusal;
+  `unsafe` stays off. Different frame rates are accepted (M4-R1). ffmpeg converts the rate
+  and the channels itself (P-M6-2), so this refusal is stricter than the
+  reference.
+- D-M6-4. Default (D1: the compiler never rewrites; the gate tests the laws
+  by evaluation and R1): `concat` is associative; `scale`, `crop` and `pad`
+  distribute over it; `trim` splits at the seam, each side in the positions
+  of its own operand, and a side that keeps no frame is the empty video.
+  `burnText` does not distribute: its track is indexed by the positions of
+  the result (P-M6-3).
+- D-M6-5. Default: the plan is a list of segments, each one input and its
+  steps, in order. A `concat` appends the segment lists of its operands. A
+  step after a `concat` is pushed into each segment; a pushed `trim` or
+  text entry splits at the segment lengths. Caps: 64 segments and 64 steps
+  over all segments (`MEDIA_LIMIT`). The reference is the `-filter_complex`
+  command of section 7; one segment prints the one input command, so the
+  earlier goldens do not change.
+- D-M6-6. Default: a segment with no kept frame is the `EMPTY_VIDEO`
+  refusal (D3). There is no unit law.
+- D-M6-7. Default (O-3): each segment keeps the packets of its source, and
+  the cap of 4 GB applies to the sum. Each segment has its own decode window
+  (M5). The same file in two segments opens twice (P-M6-4).
+- D-M6-8. Default: the encode runs the segments in order with one encoder
+  pair. The video pts and the audio sample clock continue at the seam
+  (D-M6-2).
 - O-1. Default: a program takes `Video` parameters, and the command line
   binds the files. A program contains no file path. Encode is the boundary
   of the `build` command.
@@ -275,12 +336,19 @@ because the compiler refuses `axiom` (section 10 of the probe).
   the decoder gives the last kept position. Frames from the selected start
   through the last kept position are checked against the position index;
   buffered frames emitted afterward are discarded without a pts check
-  (M5-R1, `src/media.c:477`, `:1039-1065`, `:1173`).
+  (M5-R1, `src/media.c:598`, `:1401-1439`, `:1613`). With `concat`, each
+  segment keeps the packets of its source and has its own decode window;
+  the same path opens once for each segment, and the cap applies to the
+  sum (D-M6-7).
 - O-4. Probe-forced (P7): the audio of frame p is the audio from the time of
   p to the time of p + 1. The last frame keeps the audio to the end of the
   stream. The reference is `atrim` with the same audio positions.
   Known limit: the sample count ignores gaps, so after a gap of G a cut
-  keeps audio G later than its first frame, as `atrim` does.
+  keeps audio G later than its first frame, as `atrim` does. With `concat`,
+  O-4 holds for each operand: the last frame of the first operand keeps its
+  audio to the end of that stream, past the video end when the audio is
+  longer; when the audio is shorter, silence fills up to the seam; the
+  audio of the next operand starts at the seam (D-M6-1, D-M6-2).
 - O-5. Default: encode uses the container defaults of the ffmpeg command
   (libx264 and aac for `.mp4`). There is no encode specification.
 - O-6. Default: the name is video-lang.
@@ -297,8 +365,9 @@ because the compiler refuses `axiom` (section 10 of the probe).
 | M3 | Hardening: the docs, and the cost at 1080p below 4 GB (ruling M3-R1) |
 | M4 | Variable frame rate sources; source timing with `-fps_mode passthrough`; VFR R1 cases, exact laws and timestamp refusals (M4-R1, M4-R2) |
 | M5 | Decode window: the video decode of a cut starts at a safe key packet at or before the first kept position, or at packet 0; it stops sending video packets after the last kept frame; frames from the selected start through the last kept position are checked against the position index (M5-R1) |
+| M6 | Concatenation: `concat`, a plan of segments with pushed steps, the encode of two or more sources with the seam rule of the ffmpeg `concat` filter, `CONCAT_SHAPE`, and the `-filter_complex` reference (M6-R1, M6-R2, D-M6-1 to D-M6-8) |
 
-Status 2026-10-12: K0, M1, M2, M3, M4 and M5 are DONE. M3 Steps 1 to 4 are DONE.
+Status 2026-10-12: K0, M1, M2, M3, M4, M5 and M6 are DONE. M3 Steps 1 to 4 are DONE.
 Step 1 is `make perf`. Step 2 is the host docs. Step 3 is this file and
 `formers/`. Step 4 is `README.md`, `docs/host/README.md`, `docs/STATUS.md`
 and `docs/VALIDATION.md`. No milestone is open. A new milestone needs a new

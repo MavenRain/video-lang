@@ -1,7 +1,8 @@
 # video-lang
 
 video-lang is a typed language for video edits. A program trims, scales,
-crops and pads a video, and burns text into it. The compiler `langc` checks
+crops and pads a video, burns text into it, and joins two videos. The
+compiler `langc` checks
 the program and writes an mp4 file. It also prints the ffmpeg command that
 makes the same edit. The decoded frames of the two outputs are equal
 (ruling R1).
@@ -82,8 +83,8 @@ drawtext=fontfile=/System/Library/Fonts/Supplemental/Arial.ttf:text=Hi:expansion
 For each program and input, the output of `langc build` and the output of
 the `langc ffmpeg` command have equal decoded frames. The check is the
 framemd5 of all the streams, video and audio, and the frame count. The
-container bytes are not compared. `make check` checks R1 on 50 media
-programs. `make perf` checks R1 on 7 runs at 1920x1080, up to 60 seconds.
+container bytes are not compared. `make check` checks R1 on 60 media
+programs. `make perf` checks R1 on 8 runs at 1920x1080, up to 60 seconds.
 
 ## Files
 

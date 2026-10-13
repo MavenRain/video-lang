@@ -63,6 +63,12 @@ the pin.
 | P-M5-3 | In a decode from packet 0, the pts of each frame equals the indexed pts of its position, on the 20 fixtures and on the recording (38700 of 38700). |
 | P-M5-4 | An audio only decode of the recording takes 0.6 s; the video decode from packet 0 takes 33 s. Thus the audio decode stays whole (D-M5-3). |
 | P-M5-5 | Baseline at commit 98d3f06: a cut of 394 frames deep in the recording built in 46.58 s (first run) and 29.99 s (warm), peak 1023 MB and 1917 MB. With the decode window: 4.93 s and 4.16 s, byte equal outputs. |
+| P-M6-1 | Seam timing (ffmpeg-full 9.0.2 `concat` filter, `-fps_mode passthrough`): the seam after the first segment is the maximum of its audio end (last pts plus the sample duration) and video mean rate end (last pts times n/(n - 1), or 0 for one frame) in 1/1000000. Later seams accumulate these lengths on that clock. Video pts round to the 1/fr grid of the first segment; audio pts round to 1/sample_rate, and silence fills short audio up to the unrounded seam. av + av: seam 0.8 s exact, 70560 audio samples. vfr2 + av: graph seam 2.977255 s, file frame 52 at 2.96 s, 225 silence samples. Audio longer than the video: seam 3.0 s, a 1.04 s hold on the last frame. The file video tb is 1/12800 and r_frame_rate 25/1 in every case. |
+| P-M6-2 | Shape: ffmpeg refuses a size mismatch (`Input link in0:v0 parameters (size 160x120, SAR 1:1) do not match`, exit 234). It also refuses different known sample aspect ratios: two 320x240 inputs with SAR 1:1 and 2:1 fail with exit 234. An unknown SAR does not itself cause `CONCAT_SHAPE`. A missing audio stream is a graph binding error (exit 234). A 22050 Hz input and a stereo input are converted (exit 0, 44100 Hz mono). `CONCAT_SHAPE` is stricter: it also refuses a sample rate or a channel layout difference. |
+| P-M6-3 | Laws on pixels: the two sides are equal by framemd5 and by bytes for associativity (65 frames), scale distribution (40 frames) and the trim split at the seam (25 frames). |
+| P-M6-4 | One input twice: two `-i` of one file and one `-i` with `split` give equal outputs by framemd5 and by bytes (40 frames); peak RSS 68.5 MB against 57.5 MB and 64.0 MB. The plan repeats the input (D-M6-5). |
+| P-M6-5 | Front end sites: the Op table row `{"concat", 2, RULE_MEDIA, OP_CONCAT, OP_VIDEO, 0}`; a stuck `concat` keeps both operands; `src/json.c` never prints a media op. Before M6, `concat` refused as `NAME_UNKNOWN`. |
+| P-M6-6 | Cost: the packet bytes of excerptA (1118069975 video, 30964857 audio) plus excerptB (9972460, 718840) are about 1.16 GB, under the cap of 4 GB (D-M6-7). A two input reference run (clip3 then clip12) took 9.3 s at a peak of 912 MB; the seam frame 394 is at pts 13.133333 s = 394/30. |
 | B1 | `expansion=normal` with `%{n}`: the frame number is relative, so trim and text do not commute. |
 | B2 | `expansion=normal` with `100%`: ffmpeg stops with "Stray %", exit 234. |
 | B3 | `fontfile=` names a missing file: ffmpeg exits 0 and uses fontconfig. |
@@ -108,7 +114,7 @@ a step limit (`src/front/check.c:115`). The checker refuses `def rec` with
 definition with `REFUSE_REC` (`src/front/check.c:1128`). Gate rows:
 `rec.lang`, `self.lang` and `later.lang` in `test/check/expect.txt`. A
 media program needs no recursion: it is at most 64 steps (`STEP_MAX`,
-`src/media.c:34`, refusal `MEDIA_LIMIT`).
+`src/media.c:40`, refusal `MEDIA_LIMIT`).
 
 ## 4. Nat
 
@@ -119,27 +125,27 @@ larger literal gives `LEX_NAT_RANGE` (`src/front/lexer.c:138`). The
 eliminator is `fold` over `Nat`. A frame position is a `Nat`. A literal
 `interval lo hi` with lo > hi gives `INTERVAL_RANGE`. The media build
 refuses an interval with lo > hi that reaches it (`INTERVAL_ORDER`,
-`src/media.c:302`). Gate rows: the two `trap` rows in
+`src/media.c:330`). Gate rows: the two `trap` rows in
 `test/eval/expect.txt`.
 
 ## 5. How a result leaves the host
 
 `langc build PROG MAIN IN... -o OUT` decodes the inputs, runs the steps in
 process (libavfilter graphs and `sws_scale`) and encodes OUT with the
-default encoders of the container (`src/media.c:794`; libx264 and aac for
+default encoders of the container (`src/media.c:1129`; libx264 and aac for
 .mp4). It writes a temporary file and renames it to OUT only when the build
-succeeds (`src/media.c:1231`). R1 compares the decoded frames of OUT with
+succeeds (`src/media.c:1701`). R1 compares the decoded frames of OUT with
 the decoded frames of the `langc ffmpeg` output: framemd5 over all streams
 (`fm`, `test/gate.sh:164`). R1 does not compare the file bytes. Evidence:
-media R1 50 rows, P4, P8, P17 and P17b. An input must have yuv420p video
-(`MEDIA_FORMAT`, `src/media.c:389`). Constant and variable frame rate video
+media R1 60 rows, P4, P8, P17 and P17b. An input must have yuv420p video
+(`MEDIA_FORMAT`, `src/media.c:499`). Constant and variable frame rate video
 is accepted (M4-R1). Pts keep source timing relative to the first kept
 frame, rounded to `1/fr`; the last frame keeps its own duration (M4-R2).
 Missing video pts, duplicate source pts, no positive rate, and kept pts
 that collide after rounding are `MEDIA_TIMESTAMPS` refusals
-(`src/media.c:351`, `:687`). The reference uses `-fps_mode passthrough`.
+(`src/media.c:461`, `:837`). The reference uses `-fps_mode passthrough`.
 Audio is optional; when present, it must be fltp with a positive sample
-rate (`src/media.c:394`). Its pts keep gaps relative to the first kept
+rate (`src/media.c:504`). Its pts keep gaps relative to the first kept
 sample, as the C media IO cases verify on mp4 and Matroska sources.
 
 ## 6. Cost
@@ -168,6 +174,12 @@ builds in 1.53 s at a peak of 906 MB; the ffmpeg command takes 3.45 s
 frames builds in 4.2 to 4.9 s; at commit 98d3f06 it took 30 to 47 s
 (P-M5-5).
 
+With `concat` (M6), `join` of s10 with itself (500 frames) builds in
+2.58 s at a peak of 932 MB; the ffmpeg command takes 3.33 s (commit
+aae4c44, `make perf`). The real world pair of two cuts (394 and 360
+frames) builds in 5.2 s at a peak of 907 MB; the reference takes 8.0 s at
+930 MB (P-M6-6, `docs/VALIDATION.md`).
+
 ## 7. Parametric families
 
 The grammar lets a family take parameters (`src/front/parser.c:4`). The
@@ -178,7 +190,7 @@ program cannot declare a family (`REFUSE_DATA`,
 `src/front/check.c:1519`). `SubtitleTrack` is a definition, not a family:
 `List (Prod Interval Text)` (`domain/video.lang:12`). `Video` and `Font`
 have no constructor. Their values come only from the inputs of a media
-entry (`MEDIA_TYPE`, `src/media.c:279`).
+entry (`MEDIA_TYPE`, `src/media.c:413`).
 
 ## 8. Sigma projection and eta
 
@@ -193,7 +205,7 @@ The front end has `Eq`, `refl`, `symm`, `trans`, `cong` and `transport`
 (`src/front/check.c:91`). `examples/equality.lang` uses `transport` and
 `cong`, and `test/json/equality.json` is its golden file. For media, two
 programs are equal when their outputs give the same framemd5 lines. Of
-the 16 media law rows, 14 compare the full lines (`exact`). Two rows
+the 29 media law rows, 27 compare the full lines (`exact`). Two rows
 compare only the lines without the hash column (`shape`): `twice` versus
 `once`, and `scaleText` versus `textScale` (`test/media/laws.txt:11`,
 `:16`). Neither scale composition (P3) nor moving scale past burnText
@@ -239,3 +251,12 @@ in `test/check/expect.txt`.
     stays whole (P-M5-4). A test of the stop needs a decoder without delay:
     with `threads=auto`, frame threading hides a stop one position early on
     the libx264 fixtures (`docs/VALIDATION.md`).
+12. `concat` runs the segments in order with one encoder pair. Each
+    segment's length is the maximum of its audio end and video mean rate
+    end in 1/1000000; the seam is the sum of the preceding lengths. Video
+    pts round to `1/fr` of the first segment; audio pts round to
+    `1/sample_rate`, with silence up to the unrounded seam (P-M6-1).
+    `CONCAT_SHAPE` refuses a sample rate or a
+    channel layout difference that ffmpeg would convert (P-M6-2). The plan
+    repeats an input used twice (P-M6-4). The packets of all the segments
+    stay under the cap (P-M6-6).
