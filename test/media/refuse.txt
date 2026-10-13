@@ -19,3 +19,8 @@ STYLE_POS 1 stylepos.lang posBig av.mp4 /System/Library/Fonts/Supplemental/Arial
 MEDIA_FONT 2 text.lang hello av.mp4 missing.ttf
 MEDIA_FONT 2 text.lang hello av.mp4 av.mp4
 TEXT_LIMIT 1 text.lang many av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+CONCAT_SHAPE 1 concat.lang join av.mp4 av160.mp4
+CONCAT_SHAPE 1 concat.lang join av.mp4 v.mp4
+CONCAT_SHAPE 1 concat.lang join av.mp4 av22k.mp4
+EMPTY_VIDEO 1 concat.lang empty av.mp4 av.mp4
+MEDIA_TIMESTAMPS 1 concat.lang oneFrame v.mp4

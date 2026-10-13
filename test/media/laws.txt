@@ -22,3 +22,8 @@ exact space.lang vscaleCut vsmall vfr2.mp4
 exact space.lang vcropCut vbox vfr2.mp4
 exact space.lang vpadCut vframe vfr2.mp4
 exact cut.lang nestAcross capAcross vfr5.mp4
+exact concat.lang assocL assocR av.mp4 g12.mp4 av.mp4
+exact concat.lang scaleOut scaleIn av.mp4 av.mp4
+exact concat.lang cropOut cropIn av.mp4 av.mp4
+exact concat.lang padOut padIn av.mp4 av.mp4
+exact concat.lang seam split av.mp4 av.mp4

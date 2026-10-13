@@ -1,0 +1,20 @@
+-- concat gate programs (M6 Step 4). The 2 s gate clips have 50 frames, so
+-- the seam of join on two of them is at position 50. The entries with a
+-- Font take (a : Video) (b : Video) (f : Font): the CLI binds the clips,
+-- then FONT.ttf (M2-R1). The evaluator does not apply the laws (D1): the
+-- laws rows compare the two sides by framemd5.
+def join : Video -> Video -> Video := fun (a : Video) (b : Video) => concat a b
+def twice : Video -> Video := fun (v : Video) => concat v v
+def seam : Video -> Video -> Video := fun (a : Video) (b : Video) => trim (interval 40 60) (concat a b)
+def split : Video -> Video -> Video := fun (a : Video) (b : Video) => concat (trim (interval 40 49) a) (trim (interval 0 10) b)
+def assocL : Video -> Video -> Video -> Video := fun (a : Video) (b : Video) (c : Video) => concat (concat a b) c
+def assocR : Video -> Video -> Video -> Video := fun (a : Video) (b : Video) (c : Video) => concat a (concat b c)
+def scaleOut : Video -> Video -> Video := fun (a : Video) (b : Video) => scale (res 160 120) (concat a b)
+def scaleIn : Video -> Video -> Video := fun (a : Video) (b : Video) => concat (scale (res 160 120) a) (scale (res 160 120) b)
+def cropOut : Video -> Video -> Video := fun (a : Video) (b : Video) => crop (rect 40 20 160 120) (concat a b)
+def cropIn : Video -> Video -> Video := fun (a : Video) (b : Video) => concat (crop (rect 40 20 160 120) a) (crop (rect 40 20 160 120) b)
+def padOut : Video -> Video -> Video := fun (a : Video) (b : Video) => pad (padSpec 400 300 40 30 1056816) (concat a b)
+def padIn : Video -> Video -> Video := fun (a : Video) (b : Video) => concat (pad (padSpec 400 300 40 30 1056816) a) (pad (padSpec 400 300 40 30 1056816) b)
+def burn : Video -> Video -> Font -> Video := fun (a : Video) (b : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 45 55) "Hi") nil) (concat a b)
+def empty : Video -> Video -> Video := fun (a : Video) (b : Video) => trim (interval 5 15) (concat a b)
+def oneFrame : Video -> Video := fun (v : Video) => concat (trim (interval 0 0) v) v

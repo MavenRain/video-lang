@@ -1,0 +1,1 @@
+ffmpeg -i av.mp4 -i g12.mp4 -i av.mp4 -filter_complex '[0:v]setpts=PTS-STARTPTS[v0];[0:a]asetpts=PTS-STARTPTS[a0];[1:v]setpts=PTS-STARTPTS[v1];[1:a]asetpts=PTS-STARTPTS[a1];[2:v]setpts=PTS-STARTPTS[v2];[2:a]asetpts=PTS-STARTPTS[a2];[v0][a0][v1][a1][v2][a2]concat=n=3:v=1:a=1[v][a]' -map '[v]' -map '[a]' -enc_time_base:v 1:25 -fps_mode passthrough ref.mp4

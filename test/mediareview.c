@@ -177,6 +177,78 @@ static void concat_cases(const char *ffmpeg, const char *input, const char *dir)
   arena_release(&arena);
 }
 
+/* The video pts of PATH in 1/1000000, sorted (B frames are out of order in
+   the file). *COUNT gets the packet count; at most CAP go into PTS. */
+static int sorted_video_pts(const char *path, int64_t *pts, size_t cap, size_t *count) {
+  AVFormatContext *fmt = NULL;
+  *count = 0;
+  if (avformat_open_input(&fmt, path, NULL, NULL) < 0) return 0;
+  int vs = avformat_find_stream_info(fmt, NULL) < 0 ? -1 : av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, NULL, 0);
+  AVRational tb = vs < 0 ? (AVRational){0, 1} : fmt->streams[vs]->time_base;
+  AVPacket *pkt = vs < 0 ? NULL : av_packet_alloc();
+  while (pkt != NULL && av_read_frame(fmt, pkt) >= 0) {
+    if (pkt->stream_index == vs && pkt->pts != AV_NOPTS_VALUE) {
+      if (*count < cap) pts[*count] = av_rescale_q(pkt->pts, tb, AV_TIME_BASE_Q);
+      (*count)++;
+    }
+    av_packet_unref(pkt);
+  }
+  av_packet_free(&pkt);
+  avformat_close_input(&fmt);
+  qsort(pts, *count < cap ? *count : cap, sizeof *pts, cmp_pts);
+  return vs >= 0;
+}
+
+/* M6 Step 4: a spatial step and a text entry after a concat fold into each
+   segment (D-M6-4, D-M6-5; the entry splits at the segment length 50), and
+   the video pts continue at the seam through encode_all (D-M6-2, D-M6-8):
+   the first frame of the second segment gets the end of the first one. */
+static void segment_cases(const char *ffmpeg, const char *input, const char *dir) {
+  static char vf[FILTER_MAX], af[FILTER_MAX], sf[FILTER_MAX];
+  const char *program =
+    "def scaled : Video -> Video := fun (v : Video) => scale (res 160 120) (concat v v)\n"
+    "def burned : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 32 16777215 10 20) (cons (pair (interval 45 55) \"Hi\") nil) (concat v v)\n"
+    "def twice : Video -> Video := fun (v : Video) => concat v v\n"
+    "def seam : Video -> Video := fun (v : Video) => trim (interval 40 60) (concat v v)\n";
+  Arena arena; Diag diag; Machine m; DeclList decls;
+  arena_init(&arena, (size_t)64 << 20); diag_init(&diag);
+  int loaded = front_load(&arena, "segment-review.lang", program, strlen(program), &decls, &diag)
+    && check_program(&arena, &decls, &m, &diag);
+  expect("segment review program loads", loaded);
+  if (!loaded) { diag_print(&diag, stderr); arena_release(&arena); return; }
+  (void)ffmpeg;
+  char *inputs[] = {(char *)input, "/System/Library/Fonts/Supplemental/Arial.ttf"};
+  Build b; int status = 1;
+  int ok = build_prepare(&m, "scaled", inputs, 1, &b, vf, af, sf, NULL, &status);
+  expect("scale after concat folds into each segment", ok && b.plan.seg_count == 2
+    && b.cuts[0].sf != NULL && strstr(b.cuts[0].sf, "scale=160:120") != NULL
+    && b.cuts[1].sf != NULL && strstr(b.cuts[1].sf, "scale=160:120") != NULL);
+  build_close(&b);
+  diag_init(&diag);
+  ok = build_prepare(&m, "burned", inputs, 2, &b, vf, af, sf, NULL, &status);
+  expect("text after concat splits at the segment length", ok && b.plan.seg_count == 2
+    && b.cuts[0].burn_count == 1 && b.cuts[0].burns[0].lo == 45 && b.cuts[0].burns[0].hi == 49
+    && b.cuts[1].burn_count == 1 && b.cuts[1].burns[0].lo == 0 && b.cuts[1].burns[0].hi == 5);
+  build_close(&b);
+  char out[1200]; snprintf(out, sizeof out, "%s/segments.mp4", dir);
+  const char *entries[] = {"twice", "seam"};
+  const char *names[] = {"concat seam continues the video pts", "trimmed concat seam continues the video pts"};
+  const size_t want_count[] = {100, 21};
+  const size_t at[] = {50, 10};
+  const int64_t want_pts[] = {2000000, 400000};
+  for (size_t i = 0; i < sizeof entries / sizeof entries[0]; i++) {
+    int64_t pts[128]; size_t count = 0;
+    diag_init(&diag);
+    ok = build_prepare(&m, entries[i], inputs, 1, &b, vf, af, sf, NULL, &status)
+      && encode_all(&m, b.srcs, b.cuts, b.plan.seg_count, out) == 0
+      && sorted_video_pts(out, pts, sizeof pts / sizeof pts[0], &count);
+    expect(names[i], ok && count == want_count[i] && pts[0] == 0 && pts[at[i]] == want_pts[i]);
+    build_close(&b);
+    remove(out);
+  }
+  arena_release(&arena);
+}
+
 /* Seeking must preserve R1 for closed and open GOPs and gradual intra
    refresh. A recovery-point key packet may need later frames to recover. */
 static void seek_cases(const char *ffmpeg, const char *dir) {
@@ -917,6 +989,7 @@ int main(void) {
   text_escape_cases(dir);
   plan_cases(input);
   concat_cases(ffmpeg, input, dir);
+  segment_cases(ffmpeg, input, dir);
   escaper_cases();
   window_cases(input);
   mask_cases();

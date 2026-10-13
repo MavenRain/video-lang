@@ -152,11 +152,13 @@ build/langc build examples/formers.lang -x 2>/dev/null >/dev/null || status=$?
 # committed: av.mp4 (video and audio), v.mp4 (no audio), vfr.mp4 (one dropped
 # frame, no audio), vfr2.mp4 (25 fps, then 12.5 fps from position 30, with
 # audio), vfr5.mp4 (vfr2 with the 12.5 fps part 13 ms late, so the pts are off
-# the 1/fr grid) and vfrc.mp4 (positions 29 and 30 are 4 ms apart, so they
-# round to one output pts: MEDIA_TIMESTAMPS). The M5 seek fixtures (4 s, with
-# audio, libx264 -g 12 -bf 3): g12.mp4, g12.mkv (the Matroska 1 ms clock),
-# g12vfr2.mp4 (the vfr2 frame drop, 65 frames) and g12open.mp4 (open GOPs: only
-# position 0 is an IDR picture, thus each trim decodes from packet 0).
+# the 1/fr grid), vfrc.mp4 (positions 29 and 30 are 4 ms apart, so they
+# round to one output pts: MEDIA_TIMESTAMPS), av160.mp4 (av.mp4 at 160x120) and
+# av22k.mp4 (av.mp4 with 22050 Hz audio; the two are the M6 CONCAT_SHAPE rows).
+# The M5 seek fixtures (4 s, with audio, libx264 -g 12 -bf 3): g12.mp4, g12.mkv
+# (the Matroska 1 ms clock), g12vfr2.mp4 (the vfr2 frame drop, 65 frames) and
+# g12open.mp4 (open GOPs: only position 0 is an IDR picture, thus each trim
+# decodes from packet 0).
 kit=$(pwd)
 media="$tmp/media"
 mkdir -p "$media"
@@ -168,6 +170,8 @@ gsrc=testsrc2=size=320x240:rate=25:duration=4
 gsine=sine=frequency=440:duration=4
 (cd "$media" &&
   ff -f lavfi -i "$src" -f lavfi -i sine=frequency=440:duration=2 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest av.mp4 &&
+  ff -f lavfi -i testsrc2=size=160x120:rate=25:duration=2 -f lavfi -i sine=frequency=440:duration=2 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest av160.mp4 &&
+  ff -f lavfi -i "$src" -f lavfi -i sine=frequency=440:sample_rate=22050:duration=2 -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest av22k.mp4 &&
   ff -f lavfi -i "$src" -c:v libx264 -pix_fmt yuv420p v.mp4 &&
   ff -f lavfi -i "$src" -vf "select='not(eq(n,5))'" -fps_mode passthrough -c:v libx264 -pix_fmt yuv420p vfr.mp4 &&
   ff -f lavfi -i "$vsrc" -f lavfi -i sine=frequency=440:duration=3 -vf "select='lt(n,30)+mod(n,2)'" \

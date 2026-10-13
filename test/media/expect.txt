@@ -48,3 +48,13 @@ kburn 21 gop.lang kburn g12.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
 kmkv 16 gop.lang kafter g12.mkv
 kvfr 38 gop.lang kvfr g12vfr2.mp4
 kopen 21 gop.lang kopen g12open.mp4
+cpair 150 concat.lang join av.mp4 g12.mp4
+ctwice 100 concat.lang twice av.mp4
+cseam 21 concat.lang seam av.mp4 av.mp4
+cscale 100 concat.lang scaleOut av.mp4 av.mp4
+ccrop 100 concat.lang cropOut av.mp4 av.mp4
+cpad 100 concat.lang padOut av.mp4 av.mp4
+cburn 100 concat.lang burn av.mp4 av.mp4 /System/Library/Fonts/Supplemental/Arial.ttf
+cvfr 102 concat.lang join vfr2.mp4 av.mp4
+ccfr 102 concat.lang join av.mp4 vfr2.mp4
+cthree 200 concat.lang assocL av.mp4 g12.mp4 av.mp4

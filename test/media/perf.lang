@@ -7,3 +7,6 @@
 def whole : Video -> Font -> Video := fun (v : Video) (f : Font) => v
 def deep : Video -> Font -> Video := fun (v : Video) (f : Font) => trim (interval 1400 1499) v
 def chain : Video -> Font -> Video := fun (v : Video) (f : Font) => burnText (style f 48 16777215 40 40) (cons (pair (interval 25 124) "video-lang") (cons (pair (interval 125 99999) "1080p") nil)) (pad (padSpec 1920 1080 320 180 1056816) (scale (res 1280 720) (crop (rect 160 90 1600 900) (trim (interval 25 99999) v))))
+-- `join` concatenates the clip with itself (M6): on s10 only, 500 frames, one
+-- rung; the two Video parameters bind the same clip twice.
+def join : Video -> Video -> Font -> Video := fun (a : Video) (b : Video) (f : Font) => concat a b
